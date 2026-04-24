@@ -1,0 +1,10 @@
+services:
+  extracteur:
+    build: .
+    container_name: extracteur
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file: .env
+    volumes:
+      - ./status.json:/app/status.json
