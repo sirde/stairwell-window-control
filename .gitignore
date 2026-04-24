@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+.env
+.env.*
+
+status.json
+
+.vscode/
+.idea/
+*.swp
+.DS_Store
