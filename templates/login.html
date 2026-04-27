@@ -1,5 +1,10 @@
-<form method="POST">
-  <input type="text" name="username" placeholder="Username" required>
-  <input type="password" name="password" placeholder="Password" required>
-  <button type="submit">Login</button>
-</form>
+{% extends "base.html" %}
+{% block title %}Connexion{% endblock %}
+{% block content %}
+    <h2>Connexion</h2>
+    <form method="post" class="w-25">
+        <input class="form-control mb-2" name="username" placeholder="Utilisateur" required autofocus>
+        <input class="form-control mb-2" name="password" type="password" placeholder="Mot de passe" required>
+        <button class="btn btn-primary" type="submit">Se connecter</button>
+    </form>
+{% endblock %}

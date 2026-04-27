@@ -18,7 +18,6 @@ Browser ──HTTP──> Flask (app.py) ──Modbus/TCP──> Relay module �
 
 - `app.py` — Flask app, login, UI, toggle & bulk-control routes
 - `modbus_tcp.py` — Modbus-TCP client, relay pulsing + auto-release timer
-- `modbus_rtu.py` — Legacy RTU variant (not used by the web app)
 - `config.py` — Building/window layout and relay-module IP addresses
 - `weather_checker.py` — Stand-alone script, polls OpenWeather (not wired in yet)
 - `status.json` — Runtime state, created on first write

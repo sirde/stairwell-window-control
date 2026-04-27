@@ -1,157 +1,139 @@
-#!/usr/bin/env python3
-# -*- coding:utf-8 -*-
+"""Modbus-TCP relay client.
+
+One relay board per building. Each board exposes coils that, when pulsed,
+drive the open / close contactors of a window motor. We hold each coil
+high briefly, then fire an "all relays off" command ~10 s later so the
+contactors are not left energised.
+"""
+import logging
 import socket
 import threading
 import time
+from contextlib import contextmanager
 
 import config
 
+log = logging.getLogger(__name__)
+
+RELEASE_DELAY_SECONDS = 10
+CONNECT_TIMEOUT_SECONDS = 3
+
+# Per-module-IP state. One lock serialises every Modbus transaction against
+# a given relay board (most boards only tolerate a single client at a time).
+# One release timer per board (re)arms the all-relays-off on each command.
+_module_locks: dict[str, threading.Lock] = {}
+_release_timers: dict[str, threading.Timer] = {}
+_state_lock = threading.Lock()
 
 
+def _module_lock(ip: str) -> threading.Lock:
+    with _state_lock:
+        lock = _module_locks.get(ip)
+        if lock is None:
+            lock = threading.Lock()
+            _module_locks[ip] = lock
+        return lock
 
 
+def _schedule_release(ip: str) -> None:
+    with _state_lock:
+        existing = _release_timers.get(ip)
+        if existing is not None:
+            existing.cancel()
+        t = threading.Timer(RELEASE_DELAY_SECONDS, _release_all, args=(ip,))
+        t.daemon = True
+        _release_timers[ip] = t
+        t.start()
 
 
+def _release_all(ip: str) -> None:
+    try:
+        with _module_lock(ip), _tcp_session(ip) as client:
+            client.all_relay_off()
+    except Exception:
+        log.exception("Release-all failed on %s", ip)
+    finally:
+        with _state_lock:
+            _release_timers.pop(ip, None)
 
 
 class ModbusTCPClient:
     def __init__(self, host: str, port: int = 502):
         self.host = host
         self.port = port
-        self.socket = None
-        self.lock = threading.Lock()
-        self.release_timer = None
+        self.socket: socket.socket | None = None
 
-    def connect(self):
-        self.socket = socket.socket()
-        self.socket.settimeout(3)
-        self.socket.connect((self.host, self.port))
-        print(f"Connected to {self.host}:{self.port}")
+    def connect(self) -> None:
+        s = socket.socket()
+        s.settimeout(CONNECT_TIMEOUT_SECONDS)
+        s.connect((self.host, self.port))
+        self.socket = s
+        log.debug("Connected to %s:%d", self.host, self.port)
 
-    def close(self):
-        if self.socket:
+    def close(self) -> None:
+        if self.socket is not None:
             self.socket.close()
-            print("Connection closed")
+            self.socket = None
 
-    def _release_all(self):
-        time.sleep(10)  # wait before releasing
-        with self.lock:
-            try:
-                self.connect()
-                self.all_relay_off()
-                self.close()
-            except Exception as e:
-                print(f"Release error: {e}")
-            finally:
-                self.release_timer = None
-
-    def _schedule_release(self):
-        if self.release_timer:
-            self.release_timer.cancel()  # reset timer if already running
-        self.release_timer = threading.Timer(10.0, self._release_all)
-        self.release_timer.start()
-
-    def send_command(self, command: list) -> bytes:
-        if not self.socket:
-            raise Exception("Socket not connected.")
+    def _send(self, command: list[int]) -> bytes:
+        if self.socket is None:
+            raise RuntimeError("Socket not connected")
         self.socket.send(bytearray(command))
         time.sleep(0.2)
-        response = self.socket.recv(1024)
-        return response
+        return self.socket.recv(1024)
 
-    def write_coil(self, channel: int, value: int):
-        """Sends a Write Coil command (0x05) to the device."""
-        print("Write coil %s" % channel)
-        cmd = [0] * 12
-        cmd[5] = 0x06  # Byte length
-        cmd[6] = 0x01  # Device address
-        cmd[7] = 0x05  # Command: Write single coil
-        cmd[8] = 0x00
-        cmd[9] = channel
-        cmd[10] = 0xFF if value else 0x00
-        cmd[11] = 0x00
-        resp = self.send_command(cmd)
-        print(f"[WRITE COIL ch={channel} val={value}] → [{', '.join(hex(x) for x in resp)}]")
+    def write_coil(self, channel: int, value: int) -> None:
+        """Force Single Coil (0x05) on the given channel."""
+        cmd = [0, 0, 0, 0, 0, 0x06, 0x01, 0x05,
+               0x00, channel,
+               0xFF if value else 0x00, 0x00]
+        resp = self._send(cmd)
+        log.debug("write_coil ch=%d val=%d resp=%s", channel, value, resp.hex())
 
-        with self.lock:
-            self._schedule_release()
+    def all_relay_off(self) -> None:
+        """Vendor-specific "release all relays at once" (coil address 0x00FF).
 
-    def all_relay_off(self):
-        """Sends a Write Coil command (0x05) to the device."""
-        print("Release all relays")
-        cmd = [0] * 12
-        cmd[5] = 0x06  # Byte length
-        cmd[6] = 0x01  # Device address
-        cmd[7] = 0x05  # Command: Write single coil
-        cmd[8] = 0x00
-        cmd[9] = 0xFF
-        cmd[10] = 0x00 # Relay off
-        cmd[11] = 0x00
-        resp = self.send_command(cmd)
-        print(f"[RELEASE ALL COILS] → [{', '.join(hex(x) for x in resp)}]")
-
-    def read_inputs(self):
-        """Sends a Read Discrete Inputs command (0x02)."""
-        cmd = [0] * 12
-        cmd[5] = 0x06
-        cmd[6] = 0x01
-        cmd[7] = 0x02
-        cmd[8] = 0x00
-        cmd[9] = 0x00
-        cmd[10] = 0x00
-        cmd[11] = 0x08  # Read 8 bits
-        resp = self.send_command(cmd)
-        if len(resp) > 9:
-            print("Input status:", hex(resp[9]))
-        else:
-            print("Unexpected response:", resp)
-
-# --- TCP placeholder command handler ---
-def send_window_command(building, window_id, action):
-    # This would send a TCP command in a real app
-    print(f"[{building.upper()}] Window {window_id}: {action.upper()}")
+        Not standard Modbus — this board interprets writing coil 0xFF = OFF
+        as an "all coils off" broadcast. Do not replace with function 0x0F.
+        """
+        cmd = [0, 0, 0, 0, 0, 0x06, 0x01, 0x05, 0x00, 0xFF, 0x00, 0x00]
+        resp = self._send(cmd)
+        log.debug("all_relay_off resp=%s", resp.hex())
 
 
-
+@contextmanager
+def _tcp_session(ip: str):
+    client = ModbusTCPClient(ip)
+    client.connect()
     try:
-
-        ip_address = config.module_address[building]
-        tcp_client = ModbusTCPClient(ip_address)
-
-        tcp_client.connect()
-
-        relay_number_open = config.BUILDINGS[building].index(window_id) * 2
-        relay_number_close =  relay_number_open + 1
-        if action == "close":
-            tcp_client.write_coil(relay_number_open, 0)
-            tcp_client.write_coil(relay_number_close, 1)
-        else:
-            tcp_client.write_coil(relay_number_open, 1)
-            tcp_client.write_coil(relay_number_close, 0)
-
-        tcp_client.close()
-    except Exception as e:
-        print(f"error: {e}")
-        return False, f"Failed to send tcp command: {e}"
-
-    return True, "Command sent"
-
-if __name__ == "__main__":
-    client = ModbusTCPClient("192.168.2.200")
-
-    try:
-        client.connect()
-
-        # Turn ON channels 0-7
-        for i in range(2):
-            client.write_coil(i, 1)
-
-        # Turn OFF channels 0-7
-        for i in range(2):
-            client.write_coil(i, 0)
-
-        # Read input status
-        client.read_inputs()
-
+        yield client
     finally:
         client.close()
+
+
+def send_window_command(building: str, window_id: str, action: str) -> tuple[bool, str]:
+    log.info("%s window %s: %s", building, window_id, action)
+    try:
+        ip = config.module_address[building]
+    except KeyError:
+        return False, f"Aucun module configuré pour {building}"
+
+    try:
+        with _module_lock(ip), _tcp_session(ip) as client:
+            relay_open = config.BUILDINGS[building].index(window_id) * 2
+            relay_close = relay_open + 1
+            if action == "close":
+                client.write_coil(relay_open, 0)
+                client.write_coil(relay_close, 1)
+            else:
+                client.write_coil(relay_open, 1)
+                client.write_coil(relay_close, 0)
+    except (OSError, socket.timeout) as e:
+        log.exception("Modbus communication error on %s/%s (%s)", building, window_id, ip)
+        return False, f"Erreur de communication avec le module {ip} : {e}"
+    except Exception as e:
+        log.exception("Unexpected error on %s/%s (%s)", building, window_id, ip)
+        return False, f"Erreur inattendue ({ip}) : {e}"
+
+    _schedule_release(ip)
+    return True, "Commande envoyée"

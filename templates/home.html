@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Contrôle des extracteurs{% endblock %}
+
+{% block content %}
+
+<div class="weather-banner mb-3">
+    <div style="font-size:18px; line-height:1;">⚠️</div>
+    <div style="font-size:13px;">
+        Cette interface permet d'aérer la cage d'escalier durant la nuit.
+        Il n'y a <strong>aucune protection contre la pluie ou le vent</strong> —
+        pensez à refermer les fenêtres en cas de mauvaise météo, et le matin
+        lorsque la température monte.
+    </div>
+</div>
+
+{% if logged_in %}
+    <div class="section-eyebrow">Actions groupées</div>
+    <div class="bulk-actions mb-3">
+        <form method="post" action="{{ url_for('control_all_buildings', action='open') }}">
+            <button type="submit" class="btn btn-bulk-open w-100">Tout ouvrir</button>
+        </form>
+        <form method="post" action="{{ url_for('control_all_buildings', action='close') }}">
+            <button type="submit" class="btn btn-bulk-close w-100">Tout fermer</button>
+        </form>
+    </div>
+{% endif %}
+
+<div class="section-eyebrow">État des fenêtres</div>
+
+{% for building, windows in buildings.items() %}
+    {% set equipped = building in equipped_buildings %}
+    {% set interactive = equipped and logged_in %}
+    {% set bnum = building.split('_')[1] %}
+    <div class="building-card">
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <div class="bnum">{{ bnum }}</div>
+            <div class="flex-grow-1">
+                <h3>Bâtiment {{ bnum }}</h3>
+                <div class="bsub">{{ windows|length }} fenêtre{{ 's' if windows|length > 1 else '' }}</div>
+            </div>
+            {% if not equipped %}
+                <span class="non-equipe-pill">Non équipé</span>
+            {% endif %}
+        </div>
+
+        <div class="windows cols-{{ windows|length }} {% if not interactive %}disabled{% endif %}">
+            {% for window_id in windows %}
+                {% set status = window_opened[building][window_id] %}
+                <{% if interactive %}button type="button"{% else %}div{% endif %}
+                    id="{{ building }}_{{ window_id }}"
+                    class="window-box {% if interactive %}interactive{% endif %} {% if status %}open{% else %}closed{% endif %}"
+                    {% if interactive %}onclick="toggleWindow('{{ building }}', '{{ window_id }}')"{% endif %}>
+                    <div class="wtop">
+                        <span class="wlabel">{{ window_id }}</span>
+                        <span class="wkind">Fenêtre</span>
+                    </div>
+                    <span class="wstate">
+                        <span class="wshape"></span>
+                        <span class="wstate-label">{% if status %}Ouverte{% else %}Fermée{% endif %}</span>
+                    </span>
+                </{% if interactive %}button{% else %}div{% endif %}>
+            {% endfor %}
+        </div>
+    </div>
+{% endfor %}
+
+<script>
+function updateStatuses() {
+    fetch('/window_status')
+        .then(r => r.json())
+        .then(data => {
+            for (const [building, windows] of Object.entries(data)) {
+                for (const [windowId, status] of Object.entries(windows)) {
+                    const el = document.getElementById(`${building}_${windowId}`);
+                    if (!el) continue;
+                    el.classList.remove('open', 'closed');
+                    el.classList.add(status ? 'open' : 'closed');
+                    const label = el.querySelector('.wstate-label');
+                    if (label) label.textContent = status ? 'Ouverte' : 'Fermée';
+                }
+            }
+        })
+        .catch(err => console.error('Erreur de rafraîchissement :', err));
+}
+
+function showToast(message, isError) {
+    const t = document.getElementById('cmd-toast');
+    t.textContent = message;
+    t.classList.toggle('error', !!isError);
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 4000);
+}
+
+function toggleWindow(building, windowId) {
+    fetch('/toggle_window', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ building: building, window: windowId })
+    })
+    .then(r => r.json().then(data => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+        if (ok && data.success) {
+            updateStatuses();
+        } else {
+            showToast(data.error || 'Erreur inconnue', true);
+        }
+    })
+    .catch(err => showToast('Erreur réseau : ' + err, true));
+}
+
+setInterval(updateStatuses, 5000);
+</script>
+{% endblock %}
