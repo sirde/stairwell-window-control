@@ -6,6 +6,8 @@ venv/
 .gitignore
 .env
 .env.*
+status.json
+data/
 README.md
 .vscode/
 .idea/

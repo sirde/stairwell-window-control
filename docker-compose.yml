@@ -6,5 +6,7 @@ services:
     ports:
       - "5000:5000"
     env_file: .env
+    environment:
+      STATUS_FILE: /app/data/status.json
     volumes:
-      - ./status.json:/app/status.json
+      - ./data:/app/data

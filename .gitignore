@@ -10,6 +10,7 @@ env/
 !.env.example
 
 status.json
+data/
 
 .vscode/
 .idea/

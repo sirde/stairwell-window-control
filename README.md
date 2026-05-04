@@ -108,8 +108,9 @@ in the compose file. Keep it on the Pi at `/opt/extracteur/.env` with mode
 `600`. To rotate a credential, edit `.env` and run `docker compose up -d`
 — no rebuild needed.
 
-`status.json` is bind-mounted so window state survives container
-restarts.
+A `data/` directory next to `docker-compose.yml` is bind-mounted to
+`/app/data` so `status.json` (window state) survives container restarts.
+The directory is created automatically on first start.
 
 Then open `http://<pi-address>:5000`.
 
