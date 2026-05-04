@@ -7,7 +7,8 @@ env/
 
 .env
 .env.*
-!.env.example
+extracteur.env
+!extracteur.env.example
 
 status.json
 data/

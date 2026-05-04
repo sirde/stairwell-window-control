@@ -28,8 +28,13 @@ all-relays-off 10 s later so motors aren't left energised.
 
 ## Configuration
 
-The app reads secrets from environment variables. Copy `.env.example` to
-`.env` and fill it in:
+The app reads secrets from environment variables. Copy
+`extracteur.env.example` to `extracteur.env` and fill it in:
+
+> The file is intentionally **not** named `.env`. Docker Compose
+> auto-loads `.env` for YAML interpolation, which mangles werkzeug
+> password hashes (they contain `$`). Using a different name avoids
+> that.
 
 | Variable | Used by | Purpose |
 |---|---|---|
@@ -47,7 +52,7 @@ Generate a password hash with:
 python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('your-password'))"
 ```
 
-Paste the result into `.env` as `ADMIN_PASSWORD_HASH=...`.
+Paste the result into `extracteur.env` as `ADMIN_PASSWORD_HASH=...`.
 
 Edit `config.py` to change the building/window layout. Relay-module IPs and
 the equipped-buildings list are configured via the env vars above.
@@ -83,10 +88,10 @@ sudo chown $USER /opt/extracteur
 git clone <repo-url> /opt/extracteur
 cd /opt/extracteur
 
-# Create the real .env from the template, fill in the secrets:
-cp .env.example .env
-chmod 600 .env
-$EDITOR .env
+# Create the real env file from the template, fill in the secrets:
+cp extracteur.env.example extracteur.env
+chmod 600 extracteur.env
+$EDITOR extracteur.env
 
 # First start
 docker compose up -d --build
@@ -100,13 +105,13 @@ git pull
 docker compose up -d --build
 ```
 
-### About the `.env` file
+### About the `extracteur.env` file
 
-Secrets are **not** baked into the image. `.env` is `.gitignore`d and
-`.dockerignore`d, and is read by Docker at container start via `env_file:`
-in the compose file. Keep it on the Pi at `/opt/extracteur/.env` with mode
-`600`. To rotate a credential, edit `.env` and run `docker compose up -d`
-— no rebuild needed.
+Secrets are **not** baked into the image. `extracteur.env` is
+`.gitignore`d and `.dockerignore`d, and is read by Docker at container
+start via `env_file:` in the compose file. Keep it on the Pi at
+`/opt/extracteur/extracteur.env` with mode `600`. To rotate a credential,
+edit it and run `docker compose up -d` — no rebuild needed.
 
 A `data/` directory next to `docker-compose.yml` is bind-mounted to
 `/app/data` so `status.json` (window state) survives container restarts.
@@ -118,7 +123,7 @@ Then open `http://<pi-address>:5000`.
 
 ```bash
 pip install -r requirements.txt
-export $(grep -v '^#' .env | xargs)
+export $(grep -v '^#' extracteur.env | xargs)
 python app.py
 ```
 

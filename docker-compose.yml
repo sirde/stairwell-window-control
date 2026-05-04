@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     ports:
       - "5000:5000"
-    env_file: .env
+    env_file: extracteur.env
     environment:
       STATUS_FILE: /app/data/status.json
     volumes:

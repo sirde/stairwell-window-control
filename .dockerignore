@@ -6,6 +6,7 @@ venv/
 .gitignore
 .env
 .env.*
+extracteur.env
 status.json
 data/
 README.md
