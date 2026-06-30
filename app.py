@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 import os
@@ -12,9 +13,11 @@ from werkzeug.security import check_password_hash
 
 import config
 import db
+import notify
 import radar
 import weather
 from modbus_tcp import send_window_command
+from notifier import heartbeat
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -37,7 +40,8 @@ DISPLAY_TZ = ZoneInfo(config.DISPLAY_TZ)
 ACTION_FR = {"open": "Ouverture", "close": "Fermeture", "reset": "Réinitialisation"}
 SOURCE_FR = {"manual": "Manuel", "advisory": "Conseil météo",
              "auto": "Automatique", "system": "Système"}
-ACTOR_FR = {"startup": "Démarrage", "cooling": "Refroidissement"}
+ACTOR_FR = {"startup": "Démarrage", "cooling": "Refroidissement",
+            "stale": "Météo indisponible"}
 
 
 @app.template_filter("localdt")
@@ -47,6 +51,11 @@ def localdt(iso_utc: str) -> str:
         return ""
     dt = datetime.strptime(iso_utc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     return dt.astimezone(DISPLAY_TZ).strftime("%d/%m/%Y %H:%M")
+
+
+def window_label(building: str, window: str) -> str:
+    """Human location for a notification, e.g. 'Bâtiment 1 · fenêtre A'."""
+    return f"{building.replace('building_', 'Bâtiment ')} · fenêtre {window}"
 
 
 def actor_label(actor: str | None) -> str:
@@ -73,6 +82,8 @@ def reset_status_on_startup() -> None:
         reason="Redémarrage de l'application — état réinitialisé (toutes fermées)",
     )
     log.info("Status reset to all-closed on startup")
+    notify.send("app_started", "Application redémarrée",
+                "L'application a redémarré — fenêtres réinitialisées à « fermées ».")
 
 
 def load_status() -> dict:
@@ -190,6 +201,51 @@ def radar_png():
     return app.response_class(png, mimetype="image/png")
 
 
+def _qr_available() -> bool:
+    try:
+        import qrcode  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@app.route("/notifications")
+def notifications():
+    # Public: residents subscribe without the admin password. Subscription
+    # itself happens in the ntfy app — the server keeps no subscriber list.
+    topic = config.NTFY_TOPIC
+    return render_template(
+        "notifications.html",
+        ntfy_enabled=bool(config.NTFY_ENABLED and topic),
+        ntfy_server=config.NTFY_SERVER,
+        ntfy_topic=topic,
+        subscribe_url=f"{config.NTFY_SERVER}/{topic}" if topic else None,
+        qr_available=_qr_available(),
+    )
+
+
+@app.route("/notifications/qr.png")
+def notifications_qr():
+    """QR of the ntfy topic URL — scan it to subscribe in the app."""
+    if not config.NTFY_TOPIC:
+        return "", 404
+    try:
+        import qrcode
+    except ImportError:
+        return "", 404
+    img = qrcode.make(f"{config.NTFY_SERVER}/{config.NTFY_TOPIC}")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return app.response_class(buf.getvalue(), mimetype="image/png")
+
+
+@app.route("/healthz")
+def healthz():
+    # Liveness probe — public, for an external uptime monitor if used alongside
+    # (or instead of) the outbound healthchecks.io heartbeat.
+    return jsonify({"status": "ok"})
+
+
 @app.route("/conditions")
 @login_required
 def conditions():
@@ -280,6 +336,9 @@ def toggle_window():
         db.record_event(action, building=building, window=window, source="manual",
                         actor=actor, reason=f"Action manuelle — échec : {message}",
                         success=False, conditions=conditions)
+        notify.send("relay_unreachable", "Module injoignable",
+                    f"{window_label(building, window)} : commande "
+                    f"« {ACTION_FR.get(action, action).lower()} » échouée — {message}")
         return jsonify({"success": False, "error": message}), 502
 
     window_opened[building][window] = new_state
@@ -287,6 +346,11 @@ def toggle_window():
     db.record_event(action, building=building, window=window, source="manual",
                     actor=actor, reason="Action manuelle", success=True,
                     conditions=conditions)
+    if config.NOTIFY_MANUAL_ACTIONS:
+        event = "window_opened" if new_state else "window_closed"
+        verb = "ouverte" if new_state else "fermée"
+        notify.send(event, f"Fenêtre {verb}",
+                    f"{window_label(building, window)} {verb} manuellement par {actor}.")
     return jsonify({"success": True, "new_state": new_state, "message": message})
 
 
@@ -322,6 +386,17 @@ def control_all_buildings(action):
     save_status(window_opened)
 
     label = "Ouverture" if action == "open" else "Fermeture"
+    # One push for the whole bulk action, not one per window.
+    if failures:
+        notify.send("relay_unreachable", "Module injoignable",
+                    f"{label} groupée — {len(failures)} fenêtre(s) en échec : "
+                    + "; ".join(failures))
+    if config.NOTIFY_MANUAL_ACTIONS:
+        verb = "ouvertes" if action == "open" else "fermées"
+        event = "window_opened" if action == "open" else "window_closed"
+        notify.send(event, f"Fenêtres {verb}",
+                    f"Toutes les fenêtres équipées {verb} manuellement par {actor}"
+                    + (f" ({len(failures)} en échec)." if failures else "."))
     if failures:
         flash(f"{label} partielle — {len(failures)} erreur(s) : " + "; ".join(failures),
               "warning")
@@ -340,6 +415,10 @@ if config.RADAR_ENABLED and radar.available():
     radar.start_poller(on_update=lambda: weather.evaluate(load_status))
 elif config.RADAR_ENABLED:
     log.warning("Radar enabled but Pillow is missing — radar disabled")
+if config.HEALTHCHECK_URL:
+    # Outbound heartbeat: a missed ping is how the external monitor learns the
+    # app (or the whole Pi) is down — the one alert the app can't send itself.
+    heartbeat.start(config.HEALTHCHECK_URL, config.HEALTHCHECK_INTERVAL_SECONDS)
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0")

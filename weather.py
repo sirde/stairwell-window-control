@@ -11,11 +11,13 @@ relay is deployed and trusted.
 """
 import logging
 import threading
+from datetime import datetime, timezone
 
 import requests
 
 import config
 import db
+import notify
 import radar
 
 log = logging.getLogger(__name__)
@@ -35,6 +37,26 @@ _advised_lock = threading.Lock()
 # simulated open is recorded once per favourable episode (rising edge) too.
 _auto_opened: set[tuple[str, str]] = set()
 _auto_opened_lock = threading.Lock()
+
+# Notification edges — episode-level, distinct from the per-window history
+# dedupe above: a storm tripping five windows is ONE push, not five. Guarded by
+# one lock so the forecast and radar pollers can't double-send.
+#   _notified_close : a close advisory / auto-close push is outstanding.
+#   _notified_open  : a favourable-to-open push is outstanding.
+#   _weather_alerted: any weather alert (close or watch) is outstanding; gates
+#                     the single "all clear" push so it fires once, at the end.
+_notified_close = False
+_notified_open = False
+_weather_alerted = False
+_notify_lock = threading.Lock()
+
+# Graceful degradation: when the forecast can't be fetched we act on the last
+# known state. _degraded is the rising-edge flag so the precautionary close +
+# notification fire once per outage (and once on recovery); _started_at lets us
+# measure "no data since startup" when no poll has ever succeeded.
+_degraded = False
+_degraded_lock = threading.Lock()
+_started_at: str | None = None
 
 # French labels for the trigger tokens that make up an advisory's actor.
 TRIGGER_FR = {"rain": "pluie", "wind": "vent", "storm": "orage"}
@@ -229,7 +251,12 @@ def current() -> dict | None:
     wsum = latest()
     if wsum is None:
         return None
-    return {**wsum, **close_decision(wsum, radar.latest())}
+    merged = {**wsum, **close_decision(wsum, radar.latest())}
+    age = _age_seconds(wsum.get("fetched_at"))
+    merged["age_seconds"] = round(age) if age is not None else None
+    with _degraded_lock:
+        merged["stale"] = _degraded
+    return merged
 
 
 def evaluate_close(status_provider) -> None:
@@ -340,10 +367,202 @@ def evaluate_open(status_provider) -> None:
             _auto_opened.clear()
 
 
+def _msg(body: str, temps: str) -> str:
+    """Append the temperature suffix to a notification body, if known."""
+    return f"{body}. {temps}." if temps else f"{body}."
+
+
+def notify_weather() -> None:
+    """Push a notification on each rising/falling edge of the weather signals.
+
+    Independent of the dry-run history logging in evaluate_close/open: here we
+    care about *episodes*, not per-window state, so people get one push when a
+    storm arrives and one when it passes. Decisions (which flags to flip, what
+    to send) are made under the lock; the actual sends happen after releasing it
+    so a slow ntfy POST can't block the other poller.
+
+      close advisory rising  -> "Fermeture conseillée" / "Fermeture automatique"
+      caution rising (first)  -> "Météo à surveiller"
+      favourable-to-open      -> "Ouverture (simulation)"
+      everything clears       -> "Météo dégagée" (once)
+    """
+    global _notified_close, _notified_open, _weather_alerted
+    wsum = latest()
+    if wsum is None:
+        return
+    rsum = radar.latest()
+    decision = close_decision(wsum, rsum)
+    settings = db.get_automation()
+    advise = decision["advise_close"]
+    caution = bool(wsum.get("caution"))
+    temp = wsum.get("temp_c")
+    threshold = settings["open_temp_c"]
+    temps = notify.format_temps(wsum)
+
+    pending: list[tuple[str, str, str]] = []
+    with _notify_lock:
+        if advise and not _notified_close:
+            reason = "; ".join(decision["reasons"]) or "vent fort ou pluie"
+            if settings["close_enabled"]:
+                pending.append(("auto_closed", "Fermeture automatique",
+                                _msg(f"Fermeture des fenêtres — {reason}", temps)))
+            else:
+                pending.append(("close_advised", "Fermeture conseillée",
+                                _msg(f"Pensez à fermer les fenêtres — {reason}", temps)))
+            _notified_close = True
+            _weather_alerted = True
+        elif not advise:
+            _notified_close = False
+
+        # Caution is the softer "keep an eye out" signal; only push it as a
+        # standalone first alert — once a close push has gone out (_weather_alerted)
+        # a second "à surveiller" would just be noise.
+        if caution and not advise and not _weather_alerted:
+            reasons = "; ".join(wsum.get("caution_reasons") or []) or "risque météo"
+            pending.append(("weather_caution", "Météo à surveiller",
+                            _msg(f"À surveiller — {reasons}", temps)))
+            _weather_alerted = True
+
+        # Mirror evaluate_open's favourable test (cool, calm, dry, enabled).
+        favourable = (settings["open_enabled"] and temp is not None
+                      and temp < threshold and not advise)
+        if favourable and not _notified_open:
+            pending.append(("auto_opened", "Ouverture (simulation)",
+                            _msg(f"Conditions favorables — sans vent ni pluie, "
+                                 f"sous {threshold} °C", temps)))
+            _notified_open = True
+        elif not favourable:
+            _notified_open = False
+
+        if not advise and not caution and _weather_alerted:
+            pending.append(("weather_clear", "Météo dégagée",
+                            _msg("Tout est au beau fixe — ni vent fort, ni pluie, "
+                                 "ni orage", temps)))
+            _weather_alerted = False
+
+    for event, title, message in pending:
+        notify.send(event, title, message)
+
+
 def evaluate(status_provider) -> None:
-    """Run both dry-run evaluators: close advisory and auto-open simulation."""
+    """Run both dry-run evaluators (close advisory + auto-open simulation), then
+    fire any edge notifications."""
     evaluate_close(status_provider)
     evaluate_open(status_provider)
+    try:
+        notify_weather()
+    except Exception:
+        log.exception("Weather notification error")
+
+
+# --- Graceful degradation when the forecast can't be fetched -----------------
+
+def _age_seconds(iso: str | None) -> float | None:
+    """Seconds since the given ISO-UTC timestamp, or None if unparseable."""
+    if not iso:
+        return None
+    try:
+        dt = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - dt).total_seconds()
+
+
+def _is_touchy(wsum: dict | None, rsum: dict | None) -> bool:
+    """Was the last known weather anything other than calm (no wind, no rain)?
+
+    'Touchy' = the close advisory was up, or a caution flag (storm risk /
+    instability / strong gusts) was set. Being blind during a touchy spell is
+    the dangerous case, so it gets the short stale timeout; a calm last reading
+    tolerates a much longer outage.
+    """
+    if wsum is None:
+        return False
+    decision = close_decision(wsum, rsum)
+    return bool(decision["advise_close"] or wsum.get("caution")
+                or wsum.get("cape_high") or wsum.get("storm_eta"))
+
+
+def _describe_last_state(wsum: dict | None, rsum: dict | None) -> str:
+    if wsum is None:
+        return "aucune donnée depuis le démarrage"
+    decision = close_decision(wsum, rsum)
+    if decision["advise_close"]:
+        return "; ".join(decision["reasons"]) or "fermeture conseillée"
+    if wsum.get("caution"):
+        return "vigilance — " + "; ".join(wsum.get("caution_reasons") or [])
+    return "calme (ni vent ni pluie)"
+
+
+def _enter_degraded(status_provider, wsum, rsum, age, touchy) -> None:
+    """Log a dry-run precautionary close and fire the (placeholder) notify."""
+    minutes = round(age / 60)
+    last_state = _describe_last_state(wsum, rsum)
+    auto_close = db.get_automation()["close_enabled"]
+    status = status_provider()
+    all_equipped = {
+        (b, w) for b in config.EQUIPPED_BUILDINGS for w in status.get(b, {})
+    }
+    open_equipped = {(b, w) for (b, w) in all_equipped if status.get(b, {}).get(w)}
+
+    if auto_close:
+        targets, source = all_equipped, "auto"
+        verb = "Simulation — fermeture préventive"
+    else:
+        targets, source = open_equipped, "advisory"
+        verb = "Fermeture préventive conseillée"
+    reason = (f"{verb} — météo indisponible depuis {minutes} min "
+              f"(dernier état : {last_state})")
+    conditions = {"stale": True, "stale_seconds": round(age), "touchy": touchy,
+                  "last_summary": wsum, "radar": rsum}
+    for building, window in targets:
+        db.record_event("close", building=building, window=window,
+                        source=source, actor="stale", reason=reason,
+                        success=None, conditions=conditions)
+    log.warning("Weather degraded (touchy=%s): %s", touchy, reason)
+    notify.send(
+        "weather_stale", "Météo indisponible", reason,
+        priority="high" if touchy else "default",
+        stale_minutes=minutes, touchy=touchy,
+    )
+
+
+def evaluate_staleness(status_provider) -> None:
+    """Detect a forecast outage and react on the last known state.
+
+    Runs every poll cycle (success or failure). When the most recent successful
+    forecast is older than the applicable timeout — short if the last state was
+    touchy, long if it was calm — enter a degraded state once: log a dry-run
+    precautionary close and notify. A later successful poll clears it and
+    notifies recovery. Dry-run in Phase 1: nothing is ever actuated.
+    """
+    global _degraded
+    wsum = latest()
+    rsum = radar.latest()
+    if wsum is not None:
+        age = _age_seconds(wsum.get("fetched_at"))
+        touchy = _is_touchy(wsum, rsum)
+    else:
+        # No successful poll yet — measure from startup, treat as calm/unknown.
+        age = _age_seconds(_started_at)
+        touchy = False
+    if age is None:
+        return
+
+    limit = (config.WEATHER_STALE_RISKY_SECONDS if touchy
+             else config.WEATHER_STALE_CALM_SECONDS)
+
+    with _degraded_lock:
+        if age >= limit and not _degraded:
+            _degraded = True
+            _enter_degraded(status_provider, wsum, rsum, age, touchy)
+        elif age < limit and _degraded:
+            _degraded = False
+            log.info("Weather recovered after %s s outage", round(age))
+            notify.send(
+                "weather_recovered", "Météo rétablie",
+                "Les prévisions sont de nouveau disponibles.",
+            )
 
 
 def _poll_loop(status_provider, stop_event: threading.Event) -> None:
@@ -371,11 +590,20 @@ def _poll_loop(status_provider, stop_event: threading.Event) -> None:
             log.warning("Weather fetch failed: %s", e)
         except Exception:
             log.exception("Weather poll error")
+        # Always assess staleness — this is what fires the graceful-degradation
+        # precautionary close + notification when fetches keep failing, and
+        # clears it once a poll succeeds again.
+        try:
+            evaluate_staleness(status_provider)
+        except Exception:
+            log.exception("Weather staleness evaluation error")
         stop_event.wait(config.WEATHER_POLL_SECONDS)
 
 
 def start_poller(status_provider) -> threading.Event:
     """Start the background poller. Returns the Event used to stop it."""
+    global _started_at
+    _started_at = db.iso_utc_now()
     stop_event = threading.Event()
     threading.Thread(
         target=_poll_loop, args=(status_provider, stop_event),

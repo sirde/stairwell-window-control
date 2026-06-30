@@ -77,8 +77,47 @@ be judged first. RainViewer's *forecast* frames are intermittent (often absent),
 but the "raining near us now" detection from the latest frame is dependable.
 
 > The longer game is group thinking: give several residents access and nudge the
-> group (planned via ntfy.sh) so whoever is home closes — the way a shared
-> parasol already gets managed.
+> group (via ntfy.sh — see **Notifications** below) so whoever is home closes —
+> the way a shared parasol already gets managed.
+
+## Notifications
+
+Alerts are pushed via [ntfy.sh](https://ntfy.sh) (free, no account, self-hostable).
+Residents subscribe by adding the topic in the ntfy app — there is no
+server-side subscriber list to manage. The subscribe page at `/notifications`
+(public, linked as **🔔 Alertes** in the header) shows a QR and the topic name;
+unsubscribing is done in the app.
+
+**What gets pushed** (priority in brackets):
+
+| Event | When |
+|---|---|
+| Fermeture conseillée / automatique `[high]` | Close advisory rises (wind/rain/storm) |
+| Météo à surveiller `[default]` | Caution flag rises (storm risk / instability) |
+| Ouverture (simulation) `[default]` | Conditions become favourable to auto-open |
+| Météo dégagée `[low]` | Everything clears again |
+| Météo indisponible `[high/default]` | Forecast outage (escalates when the last state was touchy) |
+| Module injoignable `[high]` | A relay command fails |
+| Application redémarrée `[default]` | App start / startup reset |
+
+Each weather push carries the external temperature (and the indoor temperature
+once the Phase-2 sensor lands). Weather alerts are **episode-level** — one push
+when a storm arrives, one when it passes, not one per window. Manual open/close
+pushes are off by default (`NOTIFY_MANUAL_ACTIONS`).
+
+**Decoupling.** The transport is a self-contained, project-agnostic package
+(`notifier/` — a `Notifier` fanning out to pluggable `Channel`s: `NtfyChannel`,
+`LogChannel`) with no app imports, so it drops into another project unchanged.
+The Extracteur-specific part (event catalog, config wiring, message wording)
+lives in `notify.py`; everything routes through `notify.send(event, title, msg)`.
+
+**App-down.** A dead process can't announce its own death, so liveness is judged
+from outside: the app pings `HEALTHCHECK_URL` (e.g. a [healthchecks.io](https://healthchecks.io)
+check) every `HEALTHCHECK_INTERVAL_SECONDS` from a background thread; a missed
+ping makes that monitor raise the alarm. Point the check's own alert at the same
+ntfy topic and app-down lands in the same stream. The ping is outbound-only, so
+it needs no inbound exposure. (`/healthz` is also served for a pull-based monitor
+if you prefer one.)
 
 ## Configuration
 
@@ -110,6 +149,13 @@ The app reads secrets from environment variables. Copy
 | `DB_FILE` | `db.py` | SQLite path (Docker sets `/app/data/extracteur.db`) |
 | `RELAY_IP_BUILDING_1` / `_3` / `_5` | `config.py` | IP of each Modbus-TCP relay module |
 | `EQUIPPED_BUILDINGS` | `config.py` | Comma-separated list of wired buildings (e.g. `building_1`) |
+| `NTFY_ENABLED` | `notify.py` | Toggle ntfy push (default on; log-only when off or no topic) |
+| `NTFY_SERVER` / `NTFY_TOPIC` | `notify.py` | ntfy server (default `https://ntfy.sh`) and topic — pick an **unguessable** topic |
+| `NTFY_TOKEN` | `notify.py` | Optional bearer token for a reserved/self-hosted topic |
+| `PUBLIC_BASE_URL` | `notify.py` | Dashboard URL used as the notification tap target (optional) |
+| `NOTIFY_MANUAL_ACTIONS` | `app.py` | Also push (low-priority) on manual open/close (default off) |
+| `HEALTHCHECK_URL` | `app.py` | Heartbeat ping URL for an app-down monitor (empty = disabled) |
+| `HEALTHCHECK_INTERVAL_SECONDS` | `app.py` | Heartbeat interval (default 300) |
 
 Generate a password hash with:
 

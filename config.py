@@ -55,6 +55,14 @@ WIND_GUST_THRESHOLD_KMH = float(os.environ.get("WIND_GUST_THRESHOLD_KMH", "40"))
 # CAPE (convective fuel) shown for context and flagged above this value (J/kg).
 CAPE_THRESHOLD = float(os.environ.get("CAPE_THRESHOLD", "1000"))
 
+# Graceful degradation when the forecast can't be fetched: fall back to the LAST
+# known state. A "touchy" last reading (wind / rain / storm risk) gets a short
+# grace period before a precautionary close — being blind during risk is the
+# dangerous case. A calm last reading (no wind, no rain) tolerates a much longer
+# outage before reacting.
+WEATHER_STALE_RISKY_SECONDS = int(os.environ.get("WEATHER_STALE_RISKY_SECONDS", "600"))   # 10 min
+WEATHER_STALE_CALM_SECONDS = int(os.environ.get("WEATHER_STALE_CALM_SECONDS", "5400"))    # 90 min
+
 # --- Radar nowcast (RainViewer, free, no key) --------------------------------
 # Observe-only: detects rain on/near the residence that forecasts miss. Needs
 # Pillow; disable here or it self-disables if Pillow is absent.
@@ -73,6 +81,34 @@ RADAR_IMAGE_ZOOM = int(os.environ.get("RADAR_IMAGE_ZOOM", "9"))
 RADAR_TILE_MAX_ZOOM = int(os.environ.get("RADAR_TILE_MAX_ZOOM", "7"))
 RADAR_IMAGE_SIZE = int(os.environ.get("RADAR_IMAGE_SIZE", "384"))
 RADAR_IMAGE_TTL = int(os.environ.get("RADAR_IMAGE_TTL", "120"))
+
+# --- Notifications (ntfy.sh) --------------------------------------------------
+# Push alerts via ntfy.sh (free, no account; self-hostable). Residents subscribe
+# by adding the topic in the ntfy app — there is no server-side subscriber list.
+# The topic name is the only access control on the public server, so pick an
+# unguessable one (anyone who knows it can read AND publish). NTFY_TOKEN locks
+# publishing on a reserved/self-hosted topic.
+NTFY_ENABLED = os.environ.get("NTFY_ENABLED", "1") == "1"
+NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
+NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "") or None
+
+# Public URL of this dashboard, used as the "tap to open" target on a
+# notification (and shown on the subscribe page). Optional.
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+
+# Manual open/close from the dashboard also pushes a (low-priority) notification.
+# Off by default so an admin tapping windows doesn't ping everyone; the valuable
+# pushes are the weather-driven and failure ones.
+NOTIFY_MANUAL_ACTIONS = os.environ.get("NOTIFY_MANUAL_ACTIONS", "0") == "1"
+
+# --- App-down watchdog (healthchecks.io heartbeat) ---------------------------
+# The app pings this URL on a timer; a missed ping makes the external monitor
+# raise the alarm (point that monitor's alert at the same ntfy topic for one
+# unified stream). Outbound-only, so it needs no inbound exposure. Disabled when
+# the URL is empty.
+HEALTHCHECK_URL = os.environ.get("HEALTHCHECK_URL", "")
+HEALTHCHECK_INTERVAL_SECONDS = int(os.environ.get("HEALTHCHECK_INTERVAL_SECONDS", "300"))
 
 # --- Persistence / display ---------------------------------------------------
 # SQLite database for the event history and weather snapshots. In Docker this

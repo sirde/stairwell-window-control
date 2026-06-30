@@ -343,14 +343,26 @@
 
     <header class="app-header">
         <div class="d-flex align-items-center gap-2 px-3 py-2" style="max-width: 820px; margin: 0 auto;">
-            <div class="logo">EF</div>
-            <div class="flex-grow-1">
-                <div style="font-size:13px; font-weight:700; line-height:1.1;">Extracteurs de fumée</div>
-                <div style="font-size:11px; color: var(--muted); margin-top:1px;">
-                    Cages d'escalier · Résidence
+            <a href="{{ url_for('home') }}"
+               class="d-flex align-items-center gap-2 flex-grow-1 text-decoration-none"
+               style="color: inherit;">
+                <div class="logo">EF</div>
+                <div>
+                    <div style="font-size:13px; font-weight:700; line-height:1.1;">Extracteurs de fumée</div>
+                    <div style="font-size:11px; color: var(--muted); margin-top:1px;">
+                        Cages d'escalier · Résidence
+                    </div>
                 </div>
-            </div>
+            </a>
+            {% if request.endpoint != 'login' %}
+            <a href="{{ url_for('notifications') }}" class="btn btn-link btn-sm text-decoration-none"
+               style="color: var(--accent); font-size:12px;">🔔 Alertes</a>
+            {% endif %}
             {% if logged_in %}
+                {% if request.endpoint != 'home' %}
+                <a href="{{ url_for('home') }}" class="btn btn-link btn-sm text-decoration-none"
+                   style="color: var(--accent); font-size:12px;">Accueil</a>
+                {% endif %}
                 <a href="{{ url_for('conditions') }}" class="btn btn-link btn-sm text-decoration-none"
                    style="color: var(--accent); font-size:12px;">Conditions</a>
                 <a href="{{ url_for('history') }}" class="btn btn-link btn-sm text-decoration-none"
