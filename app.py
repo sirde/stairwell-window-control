@@ -2,14 +2,18 @@ import json
 import logging
 import os
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
+from zoneinfo import ZoneInfo
 
 from flask import (Flask, flash, jsonify, redirect, render_template, request,
                    session, url_for)
 from werkzeug.security import check_password_hash
 
 import config
+import db
+import radar
+import weather
 from modbus_tcp import send_window_command
 
 logging.basicConfig(
@@ -27,6 +31,35 @@ PASSWORD_HASH = os.environ["ADMIN_PASSWORD_HASH"]
 
 STATUS_FILE = os.environ.get("STATUS_FILE", "status.json")
 
+DISPLAY_TZ = ZoneInfo(config.DISPLAY_TZ)
+
+# Human labels for the event list.
+ACTION_FR = {"open": "Ouverture", "close": "Fermeture", "reset": "Réinitialisation"}
+SOURCE_FR = {"manual": "Manuel", "advisory": "Conseil météo",
+             "auto": "Automatique", "system": "Système"}
+ACTOR_FR = {"startup": "Démarrage", "cooling": "Refroidissement"}
+
+
+@app.template_filter("localdt")
+def localdt(iso_utc: str) -> str:
+    """Render a stored UTC ISO timestamp as local d/m/y hh:mm (display only)."""
+    if not iso_utc:
+        return ""
+    dt = datetime.strptime(iso_utc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return dt.astimezone(DISPLAY_TZ).strftime("%d/%m/%Y %H:%M")
+
+
+def actor_label(actor: str | None) -> str:
+    """Friendly French label for an event's actor (user / weather trigger)."""
+    if not actor:
+        return "—"
+    if actor in ACTOR_FR:
+        return ACTOR_FR[actor]
+    parts = actor.split("+")
+    if parts and all(p in weather.TRIGGER_FR for p in parts):
+        return "Météo (" + "/".join(weather.TRIGGER_FR[p] for p in parts) + ")"
+    return actor
+
 
 def default_status() -> dict:
     return {b: {w: False for w in windows} for b, windows in config.BUILDINGS.items()}
@@ -35,6 +68,10 @@ def default_status() -> dict:
 def reset_status_on_startup() -> None:
     """Physical window state is unknown after a restart — assume all closed."""
     save_status(default_status())
+    db.record_event(
+        "reset", source="system", actor="startup",
+        reason="Redémarrage de l'application — état réinitialisé (toutes fermées)",
+    )
     log.info("Status reset to all-closed on startup")
 
 
@@ -91,6 +128,7 @@ def login():
         if username == USERNAME and check_password_hash(PASSWORD_HASH, password):
             session.permanent = True
             session["logged_in"] = True
+            session["user"] = username
             return redirect(url_for("home"))
         flash("Identifiants invalides", "danger")
     return render_template("login.html")
@@ -110,6 +148,12 @@ def home():
         window_opened=load_status(),
         buildings=config.BUILDINGS,
         equipped_buildings=config.EQUIPPED_BUILDINGS,
+        weather=weather.current(),
+        radar=radar.latest(),
+        radar_radius_km=int(config.RADAR_RAIN_RADIUS_KM),
+        automation=db.get_automation(),
+        auto_open_min=db.AUTO_OPEN_TEMP_MIN,
+        auto_open_max=db.AUTO_OPEN_TEMP_MAX,
     )
 
 
@@ -117,6 +161,99 @@ def home():
 def window_status():
     # Intentionally public: read-only, used by the dashboard auto-refresh.
     return jsonify(load_status())
+
+
+@app.route("/weather.json")
+def weather_json():
+    # Public read-only, like /window_status. Used by the home weather panel.
+    current = weather.current()
+    return jsonify(current if current else {"available": False})
+
+
+@app.route("/radar.json")
+def radar_json():
+    # Public read-only radar nowcast for the home panel.
+    latest = radar.latest()
+    return jsonify(latest if latest else {"available": False})
+
+
+@app.route("/radar.png")
+def radar_png():
+    # Composited radar map (cached) for the hover preview.
+    if not (config.RADAR_ENABLED and radar.available()):
+        return "", 404
+    try:
+        png = radar.cached_image()
+    except Exception:
+        log.exception("Radar image compose failed")
+        return "", 502
+    return app.response_class(png, mimetype="image/png")
+
+
+@app.route("/conditions")
+@login_required
+def conditions():
+    wseries = []
+    for r in db.recent_weather(limit=500):
+        raw = json.loads(r["raw"]) if r.get("raw") else {}
+        wseries.append({
+            "ts": r["ts"], "temp": r["temp_c"], "wind": r["wind_gust_kmh"],
+            "rain_prob": r["rain_prob"], "cape": raw.get("cape_max"),
+            "advise": r["advise_close"], "caution": r.get("caution"),
+        })
+    rseries = [{"ts": r["ts"], "rain_near": r["rain_near"], "nearest_km": r["nearest_km"]}
+               for r in db.recent_radar(limit=500)]
+    wseries.reverse()           # recent_* return newest-first; charts want oldest-first
+    rseries.reverse()
+    return render_template(
+        "conditions.html",
+        wseries=wseries, rseries=rseries,
+        wind_threshold=config.WIND_GUST_THRESHOLD_KMH,
+        rain_threshold=config.RAIN_PROB_THRESHOLD,
+        cape_threshold=config.CAPE_THRESHOLD,
+        radar_radius=int(config.RADAR_RAIN_RADIUS_KM),
+    )
+
+
+@app.route("/settings/automation", methods=["POST"])
+@login_required
+def settings_automation():
+    """Save automation settings — any subset of {open, close, threshold}."""
+    data = request.get_json(silent=True) or {}
+    kwargs = {}
+    if "open_enabled" in data:
+        kwargs["open_enabled"] = bool(data["open_enabled"])
+    if "close_enabled" in data:
+        kwargs["close_enabled"] = bool(data["close_enabled"])
+    if "open_temp_c" in data:
+        try:
+            kwargs["open_temp_c"] = int(data["open_temp_c"])
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "Seuil invalide"}), 400
+    if not kwargs:
+        return jsonify({"success": False, "error": "Aucun réglage fourni"}), 400
+
+    saved = db.set_automation(**kwargs)
+    log.info("Automation settings updated by %s: %s", session.get("user"), saved)
+    # Re-evaluate immediately so toggling on during a storm (or on a cool, calm
+    # evening) logs the simulated action at once instead of next poll.
+    try:
+        weather.evaluate(load_status)
+    except Exception:
+        log.exception("Automation re-evaluation after settings change failed")
+    return jsonify({"success": True, **saved})
+
+
+@app.route("/history")
+@login_required
+def history():
+    events = db.recent_events(limit=300)
+    for e in events:
+        e["conditions"] = json.loads(e["conditions"]) if e.get("conditions") else None
+        e["action_fr"] = ACTION_FR.get(e["action"], e["action"])
+        e["source_fr"] = SOURCE_FR.get(e["source"], e["source"])
+        e["actor_fr"] = actor_label(e["actor"])
+    return render_template("history.html", events=events)
 
 
 @app.route("/toggle_window", methods=["POST"])
@@ -134,14 +271,22 @@ def toggle_window():
 
     new_state = not window_opened[building][window]
     action = "open" if new_state else "close"
+    actor = session.get("user")
+    conditions = weather.latest()
 
     success, message = send_window_command(building, window, action)
     if not success:
-        # Don't persist a state we failed to apply.
+        # Don't persist a state we failed to apply, but do record the attempt.
+        db.record_event(action, building=building, window=window, source="manual",
+                        actor=actor, reason=f"Action manuelle — échec : {message}",
+                        success=False, conditions=conditions)
         return jsonify({"success": False, "error": message}), 502
 
     window_opened[building][window] = new_state
     save_status(window_opened)
+    db.record_event(action, building=building, window=window, source="manual",
+                    actor=actor, reason="Action manuelle", success=True,
+                    conditions=conditions)
     return jsonify({"success": True, "new_state": new_state, "message": message})
 
 
@@ -154,6 +299,9 @@ def control_all_buildings(action):
 
     window_opened = load_status()
     failures: list[str] = []
+    actor = session.get("user")
+    conditions = weather.latest()
+    bulk_reason = f"Action groupée — tout {'ouvrir' if action == 'open' else 'fermer'}"
 
     for building_id, window_list in config.BUILDINGS.items():
         if building_id not in config.EQUIPPED_BUILDINGS:
@@ -164,6 +312,12 @@ def control_all_buildings(action):
                 window_opened[building_id][window_id] = (action == "open")
             else:
                 failures.append(f"{building_id}/{window_id}: {message}")
+            db.record_event(
+                action, building=building_id, window=window_id, source="manual",
+                actor=actor,
+                reason=bulk_reason if success else f"{bulk_reason} — échec : {message}",
+                success=success, conditions=conditions,
+            )
 
     save_status(window_opened)
 
@@ -176,7 +330,16 @@ def control_all_buildings(action):
     return redirect(url_for("home"))
 
 
+db.init()
 reset_status_on_startup()
+if os.environ.get("ENABLE_WEATHER_POLLER", "1") == "1":
+    weather.start_poller(load_status)
+if config.RADAR_ENABLED and radar.available():
+    # Re-evaluate the close advisory on each radar poll too, so radar-detected
+    # rain reacts without waiting for the next (slower) forecast poll.
+    radar.start_poller(on_update=lambda: weather.evaluate(load_status))
+elif config.RADAR_ENABLED:
+    log.warning("Radar enabled but Pillow is missing — radar disabled")
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0")
