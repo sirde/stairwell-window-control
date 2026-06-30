@@ -8,5 +8,6 @@ services:
     env_file: extracteur.env
     environment:
       STATUS_FILE: /app/data/status.json
+      DB_FILE: /app/data/extracteur.db
     volumes:
       - ./data:/app/data

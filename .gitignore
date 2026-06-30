@@ -11,6 +11,9 @@ extracteur.env
 !extracteur.env.example
 
 status.json
+extracteur.db
+extracteur.db-wal
+extracteur.db-shm
 data/
 
 .vscode/
