@@ -119,15 +119,57 @@ ntfy topic and app-down lands in the same stream. The ping is outbound-only, so
 it needs no inbound exposure. (`/healthz` is also served for a pull-based monitor
 if you prefer one.)
 
+## Network
+
+The Pi runs on the **services** VLAN (2200, `10.132.0.0/16`) as `services.eco`
+(`10.132.0.133`) — the same address it's reachable on from anywhere on the
+estate. The relay modules live on a separate, **isolated IoT VLAN** (470,
+`10.137.0.0/16`), routed by the Mikrotik with no NAT and firewalled so that
+*only* the Pi can reach them — the relays themselves have no route to the
+internet. The app talks to each relay over **Modbus/TCP on port 502**.
+
+Building identifiers are the postal addresses (Chemin des Tines 1 / 3 / 5), which
+map to the construction-code buildings and relay IPs as follows:
+
+| Config key (`RELAY_IP_BUILDING_…`) | Address | Building | Relay IP | Status |
+|---|---|---|---|---|
+| `building_1` | Tines 1 | B | `10.137.0.10` | wired |
+| `building_3` | Tines 3 | A | _tbd_ | planned |
+| `building_5` | Tines 5 | C | _tbd_ | planned |
+
+On every building's DGS-1210 switch, **port 15** is pre-configured as a VLAN 470
+access port, so a relay board can be plugged in and reach the Pi with no further
+switch work. List the buildings whose relay is actually wired in
+`EQUIPPED_BUILDINGS` (e.g. `building_1`); the others show in the UI but disabled.
+
+Full addressing, VLAN and switch-port details live in the network docs
+(`shared-internet/Network/Layout/`). To administer the switches or a relay
+directly, see **Administering the building network (VPN)** below.
+
 ## Configuration
 
-The app reads secrets from environment variables. Copy
-`extracteur.env.example` to `extracteur.env` and fill it in:
+Config comes from environment variables, split across **two files by stability**
+so shared defaults propagate through git while secrets stay per-machine:
 
-> The file is intentionally **not** named `.env`. Docker Compose
-> auto-loads `.env` for YAML interpolation, which mangles werkzeug
-> password hashes (they contain `$`). Using a different name avoids
-> that.
+- **`defaults.env`** — *committed.* Every non-secret tunable (weather thresholds,
+  radar, ntfy enable/server, poll intervals, timezone…) at its production
+  default. Add a new setting here, commit, `git pull` on the Pi → it reaches
+  every deployment with **no per-machine editing**.
+- **`extracteur.env`** — *gitignored.* Only the 7 required secrets
+  (`FLASK_SECRET_KEY`, `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH`,
+  `RELAY_IP_BUILDING_1/3/5`, `EQUIPPED_BUILDINGS`) plus per-machine notification
+  values (`NTFY_TOPIC`, `NTFY_TOKEN`, `PUBLIC_BASE_URL`, `HEALTHCHECK_URL`).
+  Copy it from `extracteur.env.example` and fill it in. It's small and rarely
+  changes.
+
+Compose layers them (`defaults.env` first, then `extracteur.env` overriding),
+and every non-secret key also has a matching default in code — so a machine
+missing `defaults.env` still runs, and only the 7 required secrets are truly
+mandatory (the app fails fast with a clear message listing any that are absent).
+
+> `extracteur.env` is intentionally **not** named `.env`: Docker Compose
+> auto-loads `.env` for YAML interpolation, which mangles werkzeug password
+> hashes (they contain `$`). Using a different name avoids that.
 
 | Variable | Used by | Purpose |
 |---|---|---|
@@ -144,7 +186,7 @@ The app reads secrets from environment variables. Copy
 | `CAPE_THRESHOLD` | `weather.py` | CAPE J/kg above which instability is flagged for context (default 1000) |
 | `RADAR_ENABLED` | `radar.py` | Toggle the RainViewer radar nowcast (default on; needs Pillow) |
 | `RADAR_RAIN_RADIUS_KM` | `radar.py` | Echo within this radius counts as "rain near us" (default 10) |
-| `RADAR_POLL_SECONDS` / `RADAR_ZOOM` | `radar.py` | Radar poll interval / tile zoom (defaults 300 / 8) |
+| `RADAR_POLL_SECONDS` / `RADAR_ZOOM` | `radar.py` | Radar poll interval / tile zoom (defaults 300 / 7 — do **not** raise `RADAR_ZOOM` above 7; the mosaic returns a placeholder that reads as fake rain) |
 | `DISPLAY_TZ` | `app.py` | Timezone for displayed timestamps (default `Europe/Paris`) |
 | `DB_FILE` | `db.py` | SQLite path (Docker sets `/app/data/extracteur.db`) |
 | `RELAY_IP_BUILDING_1` / `_3` / `_5` | `config.py` | IP of each Modbus-TCP relay module |
@@ -191,15 +233,14 @@ docker compose down
 
 Build happens on the Pi itself — the image is tiny, no registry needed.
 
-**First-time setup** on the Pi:
+**First-time setup** on the Pi (currently deployed at `~/stairwell-window-control`):
 
 ```bash
-sudo mkdir -p /opt/extracteur
-sudo chown $USER /opt/extracteur
-git clone <repo-url> /opt/extracteur
-cd /opt/extracteur
+git clone <repo-url> ~/stairwell-window-control
+cd ~/stairwell-window-control
 
-# Create the real env file from the template, fill in the secrets:
+# defaults.env is committed (shared non-secret config). You only create the
+# secrets file — the 7 required vars + any per-machine notification values:
 cp extracteur.env.example extracteur.env
 chmod 600 extracteur.env
 $EDITOR extracteur.env
@@ -211,18 +252,24 @@ docker compose up -d --build
 **Updates** (from your laptop, push; on the Pi):
 
 ```bash
-cd /opt/extracteur
-git pull
+cd ~/stairwell-window-control
+git pull        # brings any new defaults.env settings automatically
 docker compose up -d --build
 ```
 
-### About the `extracteur.env` file
+Because non-secret settings live in the committed `defaults.env` (and in code),
+a `git pull` propagates new config to the Pi with no env editing — you only touch
+`extracteur.env` when a genuinely new **secret** appears.
 
-Secrets are **not** baked into the image. `extracteur.env` is
-`.gitignore`d and `.dockerignore`d, and is read by Docker at container
-start via `env_file:` in the compose file. Keep it on the Pi at
-`/opt/extracteur/extracteur.env` with mode `600`. To rotate a credential,
-edit it and run `docker compose up -d` — no rebuild needed.
+### About the env files
+
+Secrets are **not** baked into the image. `extracteur.env` is `.gitignore`d and
+`.dockerignore`d, and is read by Docker at container start via `env_file:` in the
+compose file (layered after the committed `defaults.env`). Keep it next to
+`docker-compose.yml` with mode `600`. To rotate a credential, edit it and run
+`docker compose up -d` — no rebuild needed. If it's missing entirely, the
+container still starts (Compose `required: false`) and exits with a clear list of
+the required vars to set.
 
 A `data/` directory next to `docker-compose.yml` is bind-mounted to
 `/app/data` so `status.json` (window state) and `extracteur.db` (history +
@@ -252,7 +299,7 @@ from the services Pi rather than directly over this tunnel.
 
 ```bash
 pip install -r requirements.txt
-export $(grep -v '^#' extracteur.env | xargs)
+export $(grep -vhE '^\s*#|^\s*$' defaults.env extracteur.env | xargs)
 python app.py
 ```
 
