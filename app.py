@@ -37,11 +37,12 @@ STATUS_FILE = os.environ.get("STATUS_FILE", "status.json")
 DISPLAY_TZ = ZoneInfo(config.DISPLAY_TZ)
 
 # Human labels for the event list.
-ACTION_FR = {"open": "Ouverture", "close": "Fermeture", "reset": "Réinitialisation"}
+ACTION_FR = {"open": "Ouverture", "close": "Fermeture", "reset": "Réinitialisation",
+             "caution": "Vigilance", "clear": "Beau fixe"}
 SOURCE_FR = {"manual": "Manuel", "advisory": "Conseil météo",
              "auto": "Automatique", "system": "Système"}
 ACTOR_FR = {"startup": "Démarrage", "cooling": "Refroidissement",
-            "stale": "Météo indisponible"}
+            "stale": "Météo indisponible", "weather": "Météo"}
 
 
 @app.template_filter("localdt")

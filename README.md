@@ -231,6 +231,23 @@ automatically on first start.
 
 Then open `http://<pi-address>:5000`.
 
+## Administering the building network (VPN)
+
+The switches and relay modules live on the building's internal management / IoT
+subnets, not on the public internet. To reach them — e.g. to configure the relay
+VLAN or a switch — bring up the technical WireGuard tunnel first:
+
+```bash
+sudo wg-quick up /home/cedric/wg-technical.conf    # connect
+sudo wg-quick down /home/cedric/wg-technical.conf  # disconnect when done
+```
+
+This routes the management network `10.134.0.0/16`, so the L3 switch
+(`http://10.134.0.1`) and the per-building DGS-1210 switches
+(`10.134.0.111` / `.131` / `.151`) become reachable. The relay modules sit on the
+isolated IoT VLAN (`10.137.0.0/16`, VID 470), routed by the Mikrotik and reachable
+from the services Pi rather than directly over this tunnel.
+
 ## Running locally
 
 ```bash

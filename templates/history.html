@@ -24,7 +24,9 @@
                 <tr>
                     <td class="ts">{{ e.ts|localdt }}</td>
                     <td>
-                        {% if e.building and e.window %}
+                        {% if e.action in ['caution', 'clear'] %}
+                            <span class="ev-cond">Météo</span>
+                        {% elif e.building and e.window %}
                             Bât {{ e.building.split('_')[1] }} · {{ e.window }}
                         {% else %}
                             <span class="ev-cond">Toutes</span>

@@ -385,6 +385,11 @@ def notify_weather() -> None:
       caution rising (first)  -> "Météo à surveiller"
       favourable-to-open      -> "Ouverture (simulation)"
       everything clears       -> "Météo dégagée" (once)
+
+    Caution and the all-clear leave no window event of their own (they aren't
+    window actions), so unlike the close/open pushes — which evaluate_close/open
+    already log — we record them here as `system` weather events, so every push
+    has a matching row in /history.
     """
     global _notified_close, _notified_open, _weather_alerted
     wsum = latest()
@@ -400,6 +405,7 @@ def notify_weather() -> None:
     temps = notify.format_temps(wsum)
 
     pending: list[tuple[str, str, str]] = []
+    logs: list[tuple[str, str]] = []     # (action, reason) weather events to record
     with _notify_lock:
         if advise and not _notified_close:
             reason = "; ".join(decision["reasons"]) or "vent fort ou pluie"
@@ -421,6 +427,7 @@ def notify_weather() -> None:
             reasons = "; ".join(wsum.get("caution_reasons") or []) or "risque météo"
             pending.append(("weather_caution", "Météo à surveiller",
                             _msg(f"À surveiller — {reasons}", temps)))
+            logs.append(("caution", f"Vigilance météo — {reasons}"))
             _weather_alerted = True
 
         # Mirror evaluate_open's favourable test (cool, calm, dry, enabled).
@@ -438,8 +445,14 @@ def notify_weather() -> None:
             pending.append(("weather_clear", "Météo dégagée",
                             _msg("Tout est au beau fixe — ni vent fort, ni pluie, "
                                  "ni orage", temps)))
+            logs.append(("clear", "Retour au beau fixe — ni vent fort, ni pluie, ni orage"))
             _weather_alerted = False
 
+    # Record the weather events first so the /history row exists by the time the
+    # push lands; conditions=wsum gives the row its temp/rain/gust detail line.
+    for action, reason in logs:
+        db.record_event(action, source="system", actor="weather",
+                        reason=reason, conditions=wsum)
     for event, title, message in pending:
         notify.send(event, title, message)
 
