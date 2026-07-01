@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Journal des conditions{% endblock %}
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="section-eyebrow">Journal des conditions — relevés météo &amp; radar</div>
+
+{% if not wseries and not rseries %}
+    <div class="building-card">
+        <div class="empty-note">Aucun relevé enregistré pour l'instant. Les relevés
+        s'accumulent à chaque interrogation météo / radar.</div>
+    </div>
+{% else %}
+    <div class="section-eyebrow" id="cond-meta"></div>
+
+    <div class="building-card"><div class="chart-title">Température (°C)</div>
+        <div class="chart-wrap"><canvas id="c-temp"></canvas></div></div>
+    <div class="building-card"><div class="chart-title">Rafales (km/h) — ligne = seuil de fermeture</div>
+        <div class="chart-wrap"><canvas id="c-wind"></canvas></div></div>
+    <div class="building-card"><div class="chart-title">Pluie — prévision (%) &amp; détections radar (●)</div>
+        <div class="chart-wrap"><canvas id="c-rain"></canvas></div></div>
+    <div class="building-card"><div class="chart-title">Instabilité — CAPE (J/kg)</div>
+        <div class="chart-wrap"><canvas id="c-cape"></canvas></div></div>
+    <div class="building-card"><div class="chart-title">Avis du système au fil du temps</div>
+        <div class="chart-wrap short"><canvas id="c-advice"></canvas></div></div>
+
+<script>
+const W = {{ wseries|tojson }};
+const R = {{ rseries|tojson }};
+const WIND_THR = {{ wind_threshold }}, RAIN_THR = {{ rain_threshold }}, CAPE_THR = {{ cape_threshold }};
+
+const ms  = s => new Date(s).getTime();
+const fmt = v => new Date(v).toLocaleString('fr-FR',
+    { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+const xy  = (arr, key) => arr.filter(d => d[key] !== null && d[key] !== undefined)
+                             .map(d => ({ x: ms(d.ts), y: d[key] }));
+
+function thresholdDS(points, thr) {
+    if (!points.length) return null;
+    const xs = points.map(p => p.x);
+    return { data: [{ x: Math.min(...xs), y: thr }, { x: Math.max(...xs), y: thr }],
+             borderColor: '#b42318', borderDash: [5, 4], borderWidth: 1,
+             pointRadius: 0, fill: false };
+}
+
+function opts(yTitle, yOpts) {
+    return {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'nearest', intersect: false },
+        scales: {
+            x: { type: 'linear', ticks: { maxTicksLimit: 7, callback: fmt, font: { size: 10 } } },
+            y: Object.assign({ title: { display: !!yTitle, text: yTitle } }, yOpts || {}),
+        },
+        plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { title: it => fmt(it[0].parsed.x) } },
+        },
+    };
+}
+
+function line(id, points, color, yTitle, extra) {
+    const datasets = [{ data: points, borderColor: color, backgroundColor: color + '22',
+                        borderWidth: 2, pointRadius: 0, tension: 0.25, fill: false }];
+    (extra || []).filter(Boolean).forEach(d => datasets.push(d));
+    new Chart(document.getElementById(id), { type: 'line', data: { datasets }, options: opts(yTitle) });
+}
+
+const windPts = xy(W, 'wind');
+const capePts = xy(W, 'cape');
+line('c-temp', xy(W, 'temp'), '#2b50d6', '°C');
+line('c-wind', windPts, '#a85a00', 'km/h', [thresholdDS(windPts, WIND_THR)]);
+line('c-cape', capePts, '#6b4a00', 'J/kg', [thresholdDS(capePts, CAPE_THR)]);
+
+// Rain: forecast probability line + threshold + radar "rain near" dots at the top.
+const rainPts = xy(W, 'rain_prob');
+const radarDots = R.filter(d => d.rain_near).map(d => ({ x: ms(d.ts), y: 100 }));
+new Chart(document.getElementById('c-rain'), {
+    type: 'line',
+    data: { datasets: [
+        { data: rainPts, borderColor: '#1a7f3c', backgroundColor: '#1a7f3c22',
+          borderWidth: 2, pointRadius: 0, tension: 0.25, fill: false },
+        thresholdDS(rainPts, RAIN_THR),
+        { type: 'scatter', data: radarDots, borderColor: '#b42318',
+          backgroundColor: '#b42318', pointRadius: 3 },
+    ].filter(Boolean) },
+    options: opts('%', { min: 0, max: 105 }),
+});
+
+// Advisory timeline: when the system would have advised closing / flagged caution.
+new Chart(document.getElementById('c-advice'), {
+    type: 'line',
+    data: { datasets: [
+        { label: 'Fermeture', data: W.map(d => ({ x: ms(d.ts), y: d.advise ? 1 : 0 })),
+          stepped: true, borderColor: '#b42318', borderWidth: 2, pointRadius: 0 },
+        { label: 'Vigilance', data: W.map(d => ({ x: ms(d.ts), y: d.caution ? 0.5 : 0 })),
+          stepped: true, borderColor: '#a85a00', borderWidth: 1.5, pointRadius: 0 },
+    ] },
+    options: Object.assign(opts('', { min: 0, max: 1.1, ticks: { display: false } }),
+                           { plugins: { legend: { display: true, labels: { boxWidth: 12, font: { size: 11 } } },
+                                        tooltip: { callbacks: { title: it => fmt(it[0].parsed.x) } } } }),
+});
+
+const span = [...W.map(d => d.ts), ...R.map(d => d.ts)].sort();
+document.getElementById('cond-meta').textContent =
+    `${W.length} relevés météo · ${R.length} relevés radar` +
+    (span.length ? ` · du ${fmt(ms(span[0]))} au ${fmt(ms(span[span.length - 1]))}` : '');
+</script>
+{% endif %}
+{% endblock %}

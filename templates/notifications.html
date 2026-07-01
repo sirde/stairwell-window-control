@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Alertes — Extracteurs{% endblock %}
+
+{% block head %}
+<style>
+    .notif-lead { font-size: 13px; color: var(--muted); margin: 2px 2px 14px; }
+    .notif-card { background: var(--surface); border: 1px solid var(--border);
+                  border-radius: 14px; padding: 18px; }
+    .notif-qr { display: grid; place-items: center; gap: 10px; }
+    .notif-qr img {
+        width: 220px; height: 220px; image-rendering: pixelated;
+        border: 1px solid var(--border); border-radius: 12px; background: #fff; padding: 8px;
+    }
+    .notif-topic {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 15px; font-weight: 700; word-break: break-all;
+        background: var(--canvas); border: 1px solid var(--border);
+        border-radius: 8px; padding: 8px 10px; display: inline-block; margin-top: 4px;
+    }
+    .notif-steps { margin: 0; padding-left: 18px; font-size: 14px; line-height: 1.7; }
+    .notif-steps code {
+        background: var(--canvas); border: 1px solid var(--border);
+        border-radius: 6px; padding: 1px 6px;
+    }
+    .notif-store { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .notif-store a { font-size: 12px; color: var(--accent); }
+    .notif-list { font-size: 13px; color: var(--muted); margin-top: 14px; line-height: 1.7; }
+    .notif-open-btn {
+        display: inline-block; margin-top: 12px; background: var(--accent);
+        border-color: var(--accent);
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="section-eyebrow">Recevoir les alertes</div>
+<p class="notif-lead">
+    Ouvertures, fermetures sur alerte météo (vent, pluie, orage), pannes de module
+    et redémarrages — directement sur votre téléphone, via l'application gratuite
+    <strong>ntfy</strong>. Aucun compte requis.
+</p>
+
+{% if ntfy_enabled %}
+<div class="notif-card">
+    <div class="row g-4 align-items-center">
+        {% if qr_available %}
+        <div class="col-12 col-sm-5">
+            <div class="notif-qr">
+                <img src="{{ url_for('notifications_qr') }}" alt="QR d'abonnement ntfy">
+                <div style="font-size:12px; color:var(--muted);">Scannez pour vous abonner</div>
+            </div>
+        </div>
+        {% endif %}
+        <div class="{{ 'col-12 col-sm-7' if qr_available else 'col-12' }}">
+            <ol class="notif-steps">
+                <li>Installez l'application <strong>ntfy</strong>.
+                    <div class="notif-store">
+                        <a href="https://play.google.com/store/apps/details?id=io.heckel.ntfy" target="_blank" rel="noopener">Android (Play)</a>
+                        <a href="https://f-droid.org/packages/io.heckel.ntfy/" target="_blank" rel="noopener">Android (F-Droid)</a>
+                        <a href="https://apps.apple.com/app/ntfy/id1625396347" target="_blank" rel="noopener">iPhone (App Store)</a>
+                    </div>
+                </li>
+                <li>Ajoutez l'abonnement au sujet :
+                    <div class="notif-topic">{{ ntfy_topic }}</div>
+                    {% if ntfy_server != 'https://ntfy.sh' %}
+                    <div style="font-size:12px; color:var(--muted); margin-top:4px;">
+                        Serveur : <code>{{ ntfy_server }}</code>
+                    </div>
+                    {% endif %}
+                </li>
+                <li>C'est tout — les alertes arrivent toutes seules.</li>
+            </ol>
+            <a class="btn btn-primary btn-sm notif-open-btn" href="{{ subscribe_url }}"
+               target="_blank" rel="noopener">Ouvrir le sujet dans le navigateur</a>
+        </div>
+    </div>
+
+    <hr class="ao-sep">
+    <div style="font-size:13px;">
+        <strong>Se désabonner</strong> — supprimez le sujet dans l'application ntfy
+        (appui long → supprimer l'abonnement). Vous pouvez vous réabonner à tout moment.
+    </div>
+</div>
+
+<div class="notif-list">
+    <strong>Ce que vous recevrez :</strong>
+    fermeture conseillée ou automatique (vent, pluie, orage) ·
+    météo à surveiller et retour au beau fixe ·
+    ouverture quand les conditions sont favorables ·
+    météo indisponible · module relais injoignable ·
+    redémarrage de l'application.
+    Les alertes critiques (fermeture, panne) arrivent en priorité haute.
+</div>
+{% else %}
+<div class="notif-card">
+    <div style="font-size:14px;">
+        Les notifications ne sont pas configurées sur ce serveur.
+        Définissez <code>NTFY_TOPIC</code> (et activez <code>NTFY_ENABLED</code>)
+        dans la configuration pour proposer l'abonnement ici.
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}

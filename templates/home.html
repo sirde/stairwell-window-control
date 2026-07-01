@@ -7,9 +7,30 @@
     <div style="font-size:18px; line-height:1;">⚠️</div>
     <div style="font-size:13px;">
         Cette interface permet d'aérer la cage d'escalier durant la nuit.
-        Il n'y a <strong>aucune protection contre la pluie ou le vent</strong> —
+        Il n'y a <strong>aucune protection automatique contre la pluie ou le vent</strong> —
         pensez à refermer les fenêtres en cas de mauvaise météo, et le matin
         lorsque la température monte.
+    </div>
+</div>
+
+<div class="weather-card mb-3" id="weather-card">
+    <div class="wx-head">
+        <span class="wx-title">Météo · prévision Open-Meteo</span>
+        <span class="wx-fetched" id="wx-fetched"></span>
+    </div>
+    <div class="weather-metrics">
+        <div class="wx-metric"><div class="v" id="wx-temp">—</div><div class="k">Température</div></div>
+        <div class="wx-metric"><div class="v" id="wx-rain">—</div><div class="k">Pluie (<span class="wx-look">3</span>h)</div></div>
+        <div class="wx-metric"><div class="v" id="wx-wind">—</div><div class="k">Rafales (<span class="wx-look">3</span>h)</div></div>
+        <div class="wx-metric" id="wx-cape-box"><div class="v" id="wx-cape">—</div><div class="k">Orage (CAPE)</div></div>
+    </div>
+    <div class="wx-advice muted" id="wx-advice">Chargement de la météo…</div>
+    <div class="wx-radar-wrap" id="wx-radar-wrap">
+        <div class="wx-radar" id="wx-radar">🛰️ Radar : —</div>
+        <div class="radar-pop" id="radar-pop">
+            <img id="radar-img" alt="Carte radar autour de la résidence">
+            <div class="radar-cap">Radar — rayon {{ radar_radius_km }} km autour de la résidence</div>
+        </div>
     </div>
 </div>
 
@@ -22,6 +43,47 @@
         <form method="post" action="{{ url_for('control_all_buildings', action='close') }}">
             <button type="submit" class="btn btn-bulk-close w-100">Tout fermer</button>
         </form>
+    </div>
+
+    <div class="section-eyebrow">Automatisation (simulation)</div>
+    <div class="auto-open-card mb-3 {% if automation.open_enabled or automation.close_enabled %}on{% endif %}"
+         id="automation-card">
+
+        <div class="ao-row">
+            <label class="ao-switch">
+                <input type="checkbox" id="ac-enabled" {% if automation.close_enabled %}checked{% endif %}>
+                <span class="ao-slider"></span>
+            </label>
+            <div class="ao-text">
+                <div class="ao-title">Fermeture automatique</div>
+                <div class="ao-sub">Ferme <strong>toutes</strong> les fenêtres dès qu'il y a du
+                    <strong>vent fort ou de la pluie</strong> (détectée au radar ou prévue).</div>
+            </div>
+        </div>
+
+        <hr class="ao-sep">
+
+        <div class="ao-row">
+            <label class="ao-switch">
+                <input type="checkbox" id="ao-enabled" {% if automation.open_enabled %}checked{% endif %}>
+                <span class="ao-slider"></span>
+            </label>
+            <div class="ao-text">
+                <div class="ao-title">Ouverture automatique</div>
+                <div class="ao-sub">Ouvre quand l'air est <strong>frais et calme</strong> (vent OK,
+                    pas de pluie) et que la température passe sous le seuil.</div>
+            </div>
+        </div>
+        <div class="ao-threshold {% if not automation.open_enabled %}off{% endif %}" id="ao-threshold">
+            <label for="ao-temp">Ouvrir en dessous de <strong id="ao-temp-val">{{ automation.open_temp_c }}</strong> °C</label>
+            <input type="range" id="ao-temp" min="{{ auto_open_min }}" max="{{ auto_open_max }}"
+                   step="1" value="{{ automation.open_temp_c }}">
+            <div class="ao-scale"><span>{{ auto_open_min }} °C</span><span>{{ auto_open_max }} °C</span></div>
+        </div>
+
+        <div class="ao-note">Phase d'essai : <strong>aucune fenêtre n'est réellement pilotée</strong>.
+            Chaque déclenchement est seulement consigné dans l'<a href="{{ url_for('history') }}">historique</a>,
+            le temps de valider la stratégie avant le raccordement du relais.</div>
     </div>
 {% endif %}
 
@@ -108,6 +170,148 @@ function toggleWindow(building, windowId) {
     .catch(err => showToast('Erreur réseau : ' + err, true));
 }
 
+function renderWeather(data) {
+    const advice = document.getElementById('wx-advice');
+    const fetched = document.getElementById('wx-fetched');
+    const setMetric = (id, txt) => { document.getElementById(id).textContent = txt; };
+
+    if (!data || data.available === false || data.temp_c === undefined) {
+        ['wx-temp', 'wx-rain', 'wx-wind', 'wx-cape'].forEach(id => setMetric(id, '—'));
+        advice.className = 'wx-advice muted';
+        advice.textContent = 'Météo en cours de chargement…';
+        fetched.textContent = '';
+        return;
+    }
+
+    setMetric('wx-temp', data.temp_c != null ? data.temp_c.toFixed(1) + ' °C' : '—');
+    setMetric('wx-rain', data.rain_prob + ' %');
+    setMetric('wx-wind', Math.round(data.wind_gust_kmh) + ' km/h');
+    setMetric('wx-cape', data.cape_max != null ? data.cape_max + ' J/kg' : '—');
+    document.getElementById('wx-cape-box').classList.toggle('flag', !!data.cape_high);
+    document.querySelectorAll('.wx-look').forEach(s => s.textContent = data.lookahead_hours);
+
+    if (data.advise_close) {
+        advice.className = 'wx-advice warn';
+        advice.textContent = 'Fermeture conseillée — ' + (data.reasons || []).join(' ; ');
+    } else if (data.rain) {
+        const d = data.rain_detail || 'pluie détectée';
+        advice.className = 'wx-advice caution';
+        advice.textContent = d.charAt(0).toUpperCase() + d.slice(1)
+            + ' — vent faible, pas de fermeture automatique. Fermez manuellement si besoin.';
+    } else if (data.caution) {
+        advice.className = 'wx-advice caution';
+        advice.textContent = 'Vigilance — ' + (data.caution_reasons || []).join(', ')
+            + '. Surveillez la météo, fermez si besoin.';
+    } else {
+        advice.className = 'wx-advice';
+        advice.textContent = 'Conditions OK — pas de fermeture nécessaire.';
+    }
+
+    if (data.fetched_at) {
+        const t = new Date(data.fetched_at).toLocaleTimeString('fr-FR',
+            { hour: '2-digit', minute: '2-digit' });
+        fetched.textContent = 'MAJ ' + t + (data.model ? ' · ' + data.model : '');
+    }
+}
+
+function updateWeather() {
+    fetch('/weather.json').then(r => r.json()).then(renderWeather).catch(() => {});
+}
+
+function renderRadar(data) {
+    const el = document.getElementById('wx-radar');
+    if (!data || data.available === false || data.rain_near === undefined) {
+        el.className = 'wx-radar';
+        el.textContent = '🛰️ Radar : indisponible';
+        return;
+    }
+    let txt;
+    if (data.rain_near) {
+        el.className = 'wx-radar rain';
+        txt = (data.nearest_km != null && data.nearest_km < 1.5)
+            ? '🛰️ Radar : pluie sur la résidence'
+            : `🛰️ Radar : pluie à ${data.nearest_km} km ${data.direction}`;
+        if (data.approaching) txt += ' (se rapproche)';
+        if (data.eta_min != null) txt += `, sur la résidence dans ~${data.eta_min} min`;
+    } else {
+        el.className = 'wx-radar';
+        txt = `🛰️ Radar : sec (aucun écho ≤ ${data.radius_km} km)`;
+    }
+    if (data.frame_age_min != null) txt += ` · il y a ${data.frame_age_min} min`;
+    el.textContent = txt;
+}
+
+function updateRadar() {
+    fetch('/radar.json').then(r => r.json()).then(renderRadar).catch(() => {});
+}
+
+// Radar map preview: lazy-load on first reveal, refresh each open (server caches).
+const radarWrap = document.getElementById('wx-radar-wrap');
+const radarImg = document.getElementById('radar-img');
+function showRadarPop() {
+    radarImg.src = '/radar.png?t=' + Math.floor(Date.now() / 60000);
+    radarWrap.classList.add('show');
+}
+function hideRadarPop() { radarWrap.classList.remove('show'); }
+radarWrap.addEventListener('mouseenter', showRadarPop);
+radarWrap.addEventListener('mouseleave', hideRadarPop);
+radarWrap.addEventListener('click', () =>
+    radarWrap.classList.contains('show') ? hideRadarPop() : showRadarPop());
+
+renderWeather({{ weather|tojson }});
+renderRadar({{ radar|tojson }});
 setInterval(updateStatuses, 5000);
+setInterval(updateWeather, 60000);
+setInterval(updateRadar, 120000);
 </script>
+
+{% if logged_in %}
+<script>
+// Automation simulation settings: persist each toggle / threshold to the server.
+const autoCard = document.getElementById('automation-card');
+const acEnabled = document.getElementById('ac-enabled');
+const aoEnabled = document.getElementById('ao-enabled');
+const aoTemp = document.getElementById('ao-temp');
+const aoTempVal = document.getElementById('ao-temp-val');
+const aoThreshold = document.getElementById('ao-threshold');
+
+function reflectAutomation() {
+    autoCard.classList.toggle('on', acEnabled.checked || aoEnabled.checked);
+    aoThreshold.classList.toggle('off', !aoEnabled.checked);
+}
+
+function saveAutomation(payload, okMsg) {
+    fetch('/settings/automation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) showToast(okMsg);
+        else showToast(data.error || "Échec de l'enregistrement", true);
+    })
+    .catch(err => showToast('Erreur réseau : ' + err, true));
+}
+
+acEnabled.addEventListener('change', () => {
+    reflectAutomation();
+    saveAutomation({ close_enabled: acEnabled.checked },
+        acEnabled.checked ? 'Fermeture auto simulée activée'
+                          : 'Fermeture auto simulée désactivée');
+});
+aoEnabled.addEventListener('change', () => {
+    reflectAutomation();
+    saveAutomation({ open_enabled: aoEnabled.checked },
+        aoEnabled.checked ? `Ouverture auto simulée activée — sous ${aoTemp.value} °C`
+                          : 'Ouverture auto simulée désactivée');
+});
+aoTemp.addEventListener('input', () => { aoTempVal.textContent = aoTemp.value; });
+aoTemp.addEventListener('change', () =>
+    saveAutomation({ open_temp_c: parseInt(aoTemp.value, 10) },
+        `Seuil d'ouverture : ${aoTemp.value} °C`));
+
+reflectAutomation();
+</script>
+{% endif %}
 {% endblock %}

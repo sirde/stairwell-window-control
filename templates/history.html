@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Historique — Extracteurs{% endblock %}
+
+{% block content %}
+
+<div class="section-eyebrow">Historique des événements</div>
+
+<div class="building-card">
+    {% if events %}
+    <div style="overflow-x:auto;">
+        <table class="history-table">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Fenêtre</th>
+                    <th>Action</th>
+                    <th>Origine</th>
+                    <th>Par</th>
+                    <th>Raison</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for e in events %}
+                <tr>
+                    <td class="ts">{{ e.ts|localdt }}</td>
+                    <td>
+                        {% if e.action in ['caution', 'clear'] %}
+                            <span class="ev-cond">Météo</span>
+                        {% elif e.building and e.window %}
+                            Bât {{ e.building.split('_')[1] }} · {{ e.window }}
+                        {% else %}
+                            <span class="ev-cond">Toutes</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% set pill = 'advisory' if e.source == 'advisory'
+                                      else ('auto' if e.source == 'auto' else e.action) %}
+                        <span class="ev-pill {{ pill }}">
+                            {{ e.action_fr }}{% if e.source == 'auto' %} · sim{% endif %}
+                        </span>
+                        {% if e.success == 0 %}<span class="ev-cond"> ✗ échec</span>{% endif %}
+                    </td>
+                    <td>{{ e.source_fr }}</td>
+                    <td>{{ e.actor_fr }}</td>
+                    <td>
+                        {{ e.reason }}
+                        {% if e.conditions and e.conditions.temp_c is not none %}
+                            <div class="ev-cond">
+                                {{ e.conditions.temp_c }} °C ·
+                                pluie {{ e.conditions.rain_prob }} % ·
+                                rafales {{ e.conditions.wind_gust_kmh|round|int }} km/h
+                            </div>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+        <div class="empty-note">Aucun événement enregistré pour l'instant.</div>
+    {% endif %}
+</div>
+
+<div class="section-eyebrow" style="margin-top:16px;">
+    {{ events|length }} événement{{ 's' if events|length > 1 else '' }} ·
+    les 300 plus récents
+</div>
+
+{% endblock %}
