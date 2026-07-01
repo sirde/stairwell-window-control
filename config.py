@@ -1,6 +1,23 @@
 import os
 
 
+# Fail fast with one clear message if a required secret is missing, instead of a
+# raw KeyError from the first bare os.environ[...] below. These are the only vars
+# without a code default — everything else falls back to defaults.env / code.
+_REQUIRED = (
+    "FLASK_SECRET_KEY", "ADMIN_USERNAME", "ADMIN_PASSWORD_HASH",
+    "RELAY_IP_BUILDING_1", "RELAY_IP_BUILDING_3", "RELAY_IP_BUILDING_5",
+    "EQUIPPED_BUILDINGS",
+)
+_missing = [k for k in _REQUIRED if k not in os.environ]
+if _missing:
+    raise SystemExit(
+        "Missing required environment variable(s): " + ", ".join(_missing)
+        + "\nSet them in extracteur.env (copy extracteur.env.example). "
+        "Non-secret tunables default via defaults.env / code."
+    )
+
+
 # Window structure per building
 BUILDINGS = {
     "building_1": ["A"],

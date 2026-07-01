@@ -5,7 +5,16 @@ services:
     restart: unless-stopped
     ports:
       - "5000:5000"
-    env_file: extracteur.env
+    env_file:
+      # Committed non-secret defaults first, then the gitignored secrets file
+      # (later overrides earlier). `required: false` lets a fresh clone start
+      # without the secrets file — the app then fails with a clear "missing
+      # required var" message instead of Compose's cryptic file-not-found.
+      # (`required` needs Docker Compose v2.24+; drop it on older versions and
+      # just make sure extracteur.env exists.)
+      - defaults.env
+      - path: extracteur.env
+        required: false
     environment:
       STATUS_FILE: /app/data/status.json
       DB_FILE: /app/data/extracteur.db
