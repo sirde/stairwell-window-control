@@ -11,7 +11,7 @@ relay is deployed and trusted.
 """
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -80,10 +80,11 @@ def _request(model: str) -> dict:
     params = {
         "latitude": config.WEATHER_LAT,
         "longitude": config.WEATHER_LON,
-        "current": "temperature_2m,weathercode,precipitation,wind_gusts_10m",
+        "current": "temperature_2m,weathercode,precipitation,wind_gusts_10m,is_day",
         "hourly": "precipitation_probability,precipitation,wind_gusts_10m,temperature_2m,weathercode,cape",
+        "daily": "sunrise,sunset",
         "wind_speed_unit": "kmh",
-        "timezone": "auto",       # hourly times come back in local time for display
+        "timezone": "auto",       # hourly/daily times come back in local time for display
         "forecast_days": 2,
     }
     if model:
@@ -124,6 +125,41 @@ def _storm_eta(times: list, codes: list, start: int, end: int, now: str) -> str 
     return None
 
 
+def _venting_allowed(current: dict, daily: dict) -> bool | None:
+    """Is *now* inside the night-airing window (auto-open gate)?
+
+    The window is the whole night plus a grace period past sunrise: a south-facing
+    roof barely heats in the first hours after dawn (sun still low in the NE) and
+    the coolest outdoor air is right after sunrise, so venting stays worthwhile
+    for `MORNING_VENT_GRACE_HOURS` past it. The night side comes from Open-Meteo's
+    `is_day` flag (0 = night); this only bolts the morning grace on top.
+
+    Returns None when the sun times / clock can't be read, so the caller can fall
+    back to the old temperature-only behaviour rather than freeze the feature.
+    """
+    now = current.get("time")
+    is_day = current.get("is_day")
+    if not now:
+        return None if is_day is None else (is_day == 0)
+    sunrises = daily.get("sunrise") or []
+    sr = next((s for s in sunrises if s[:10] == now[:10]), sunrises[0] if sunrises else None)
+    try:
+        now_dt = datetime.strptime(now, "%Y-%m-%dT%H:%M")
+        sunrise_dt = datetime.strptime(sr, "%Y-%m-%dT%H:%M") if sr else None
+    except (ValueError, TypeError):
+        now_dt = sunrise_dt = None
+
+    # Morning grace: keep venting up to grace hours past today's sunrise, even
+    # though is_day has already flipped to 1.
+    if now_dt is not None and sunrise_dt is not None:
+        grace = timedelta(hours=config.MORNING_VENT_GRACE_HOURS)
+        if sunrise_dt <= now_dt < sunrise_dt + grace:
+            return True
+
+    # Otherwise it's simply the night part — trust the is_day flag.
+    return None if is_day is None else (is_day == 0)
+
+
 def _summarise(data: dict, model: str) -> dict:
     """Reduce a raw Open-Meteo response into two separate signals.
 
@@ -135,6 +171,7 @@ def _summarise(data: dict, model: str) -> dict:
     """
     current = data.get("current", {})
     hourly = data.get("hourly", {})
+    daily = data.get("daily", {})
     times = hourly.get("time", [])
     probs = hourly.get("precipitation_probability", [])
     precs = hourly.get("precipitation", [])
@@ -159,6 +196,14 @@ def _summarise(data: dict, model: str) -> dict:
     temp_c = current.get("temperature_2m")
     storm_now = current.get("weathercode") in STORM_CODES
     storm_eta = _storm_eta(times, codes, start, watch_end, now)
+
+    # Night-airing time gate for auto-open. None (undeterminable) collapses to
+    # True so a data hiccup falls back to the old temperature-only behaviour.
+    venting = _venting_allowed(current, daily)
+    sunrise_today = next((s for s in (daily.get("sunrise") or [])
+                          if now and s[:10] == now[:10]), None)
+    sunset_today = next((s for s in (daily.get("sunset") or [])
+                         if now and s[:10] == now[:10]), None)
 
     # --- Forecast inputs to the close decision (combined with radar elsewhere) ---
     high_wind = wind_gust >= config.WIND_GUST_THRESHOLD_KMH
@@ -186,6 +231,10 @@ def _summarise(data: dict, model: str) -> dict:
         "cape_high": cape_max >= config.CAPE_THRESHOLD,
         "storm_now": storm_now,
         "storm_eta": storm_eta,
+        "is_day": current.get("is_day"),
+        "sunrise": sunrise_today,
+        "sunset": sunset_today,
+        "venting_ok": True if venting is None else venting,
         "high_wind": high_wind,
         "forecast_rain": forecast_rain,
         "forecast_rain_detail": forecast_rain_detail,
@@ -329,11 +378,14 @@ def evaluate_open(status_provider) -> None:
     rsum = radar.latest()
     decision = close_decision(wsum, rsum)
 
-    # Favourable = enabled AND cool enough AND nothing that would advise closing
-    # (advise_close already means high wind OR rain — so its negation is
-    # "wind OK and no rain").
+    # Favourable = enabled AND inside the night-airing window AND cool enough AND
+    # nothing that would advise closing (advise_close already means high wind OR
+    # rain — so its negation is "wind OK and no rain"). The night gate keeps us
+    # from importing hot daytime air; venting_ok is the whole night + a grace
+    # period past sunrise (see _venting_allowed).
     favourable = (
         settings["open_enabled"]
+        and wsum.get("venting_ok", True)
         and temp is not None
         and temp < threshold
         and not decision["advise_close"]
@@ -430,9 +482,10 @@ def notify_weather() -> None:
             logs.append(("caution", f"Vigilance météo — {reasons}"))
             _weather_alerted = True
 
-        # Mirror evaluate_open's favourable test (cool, calm, dry, enabled).
-        favourable = (settings["open_enabled"] and temp is not None
-                      and temp < threshold and not advise)
+        # Mirror evaluate_open's favourable test (enabled, night window, cool,
+        # calm, dry).
+        favourable = (settings["open_enabled"] and wsum.get("venting_ok", True)
+                      and temp is not None and temp < threshold and not advise)
         if favourable and not _notified_open:
             pending.append(("auto_opened", "Ouverture (simulation)",
                             _msg(f"Conditions favorables — sans vent ni pluie, "
@@ -594,11 +647,12 @@ def _poll_loop(status_provider, stop_event: threading.Event) -> None:
             )
             evaluate(status_provider)
             log.info("Weather[%s]: %s°C, rain %s%% / %smm, gust %s km/h, CAPE %s, "
-                     "caution=%s, advise_close=%s (%s)",
+                     "caution=%s, advise_close=%s (%s), venting=%s",
                      summary["model"], summary["temp_c"], summary["rain_prob"],
                      summary["precip_mm"], round(summary["wind_gust_kmh"]),
                      summary["cape_max"], summary["caution"],
-                     decision["advise_close"], decision["rain_source"])
+                     decision["advise_close"], decision["rain_source"],
+                     summary["venting_ok"])
         except requests.RequestException as e:
             log.warning("Weather fetch failed: %s", e)
         except Exception:

@@ -72,6 +72,16 @@ WIND_GUST_THRESHOLD_KMH = float(os.environ.get("WIND_GUST_THRESHOLD_KMH", "40"))
 # CAPE (convective fuel) shown for context and flagged above this value (J/kg).
 CAPE_THRESHOLD = float(os.environ.get("CAPE_THRESHOLD", "1000"))
 
+# --- Night-airing time gate (auto-open) --------------------------------------
+# Auto-open (cooling) is limited to the cool part of the day: the whole night
+# plus a grace period past sunrise. Our roof/windows face south, so they barely
+# heat in the first hours after dawn (the sun is still low in the NE), and the
+# coldest outdoor air of the day is right after sunrise — so we keep venting this
+# many hours past sunrise before the day's solar gain makes importing outside air
+# counter-productive. The night side of the window comes from Open-Meteo's
+# is_day flag; this only extends the morning cutoff.
+MORNING_VENT_GRACE_HOURS = float(os.environ.get("MORNING_VENT_GRACE_HOURS", "2"))
+
 # Graceful degradation when the forecast can't be fetched: fall back to the LAST
 # known state. A "touchy" last reading (wind / rain / storm risk) gets a short
 # grace period before a precautionary close — being blind during risk is the
