@@ -40,6 +40,39 @@ EQUIPPED_BUILDINGS = {
     if b.strip()
 }
 
+# --- Window drive durations --------------------------------------------------
+# Seconds the motor is powered per command. There are no position/limit feedback
+# contacts, so travel is timed: the relay coil is held on for this long, then a
+# board-wide "all relays off" releases the contactor (see modbus_tcp.py).
+#
+# WINDOW_FULL_TRAVEL_SECONDS is the measured time from fully shut to fully open.
+# Close and partial default off it (and follow it if you retune), but each can be
+# pinned independently via env.
+#
+# Durations are validated hard at startup: a silently-accepted 0 or negative
+# would fire the all-relays-off immediately, so every command "succeeds" and the
+# UI records the new state while no motor ever moves.
+def _duration_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    try:
+        value = float(raw) if raw not in (None, "") else float(default)
+    except ValueError:
+        raise SystemExit(f"{name}={raw!r} : not a number (drive duration in seconds)")
+    if not 0 < value <= 120:
+        raise SystemExit(f"{name}={raw!r} : drive duration must be in (0, 120] seconds")
+    return value
+
+
+WINDOW_FULL_TRAVEL_SECONDS = _duration_env("WINDOW_FULL_TRAVEL_SECONDS", 20)
+# Closing overdrives past full travel so the window always seats fully shut.
+# Overdriving is safe — the motor simply stalls against the frame, exactly as it
+# does when you hold the hand switch closed. Default: full travel + 10 s margin.
+WINDOW_CLOSE_SECONDS = _duration_env(
+    "WINDOW_CLOSE_SECONDS", WINDOW_FULL_TRAVEL_SECONDS + 10)
+# "Cracked" open used when it is breezy or rain is possible. Default: half travel.
+WINDOW_PARTIAL_OPEN_SECONDS = _duration_env(
+    "WINDOW_PARTIAL_OPEN_SECONDS", WINDOW_FULL_TRAVEL_SECONDS / 2)
+
 # --- Weather (Open-Meteo, no API key) ----------------------------------------
 # Location of the residence. Falls back to the older OPENWEATHER_* names so an
 # existing Pi env keeps working after the provider switch.
@@ -68,6 +101,12 @@ WEATHER_WATCH_HOURS = int(os.environ.get("WEATHER_WATCH_HOURS", "12"))
 # Advise closing when the forecast crosses either threshold within the lookahead.
 RAIN_PROB_THRESHOLD = int(os.environ.get("RAIN_PROB_THRESHOLD", "60"))        # %
 WIND_GUST_THRESHOLD_KMH = float(os.environ.get("WIND_GUST_THRESHOLD_KMH", "40"))
+
+# Fully open a window only when the gust forecast is below this AND there is no
+# rain signal; otherwise open partially. This is the *lower* companion to
+# WIND_GUST_THRESHOLD_KMH (which advises closing): below it = fully open, above
+# WIND_GUST_THRESHOLD_KMH = close, and the band between = partial ("cracked") open.
+WIND_FULL_OPEN_MAX_KMH = float(os.environ.get("WIND_FULL_OPEN_MAX_KMH", "20"))
 
 # CAPE (convective fuel) shown for context and flagged above this value (J/kg).
 CAPE_THRESHOLD = float(os.environ.get("CAPE_THRESHOLD", "1000"))

@@ -95,11 +95,15 @@ def load_status() -> dict:
         return default_status()
 
     # Reconcile with current config: add missing buildings/windows, drop stale.
+    # Values are depth-aware: False = closed, "full" / "partial" = open depth.
+    # Legacy plain-boolean files (pre-depth) map True to a full open.
     reconciled = default_status()
     for building, windows in reconciled.items():
         for window in windows:
             if building in data and window in data[building]:
-                reconciled[building][window] = bool(data[building][window])
+                v = data[building][window]
+                reconciled[building][window] = (
+                    v if v in ("full", "partial") else ("full" if v else False))
     return reconciled
 
 
@@ -166,6 +170,7 @@ def home():
         automation=db.get_automation(),
         auto_open_min=db.AUTO_OPEN_TEMP_MIN,
         auto_open_max=db.AUTO_OPEN_TEMP_MAX,
+        morning_grace=f"{config.MORNING_VENT_GRACE_HOURS:g}",
     )
 
 
@@ -313,6 +318,24 @@ def history():
     return render_template("history.html", events=events)
 
 
+def _drive_command(action: str, wsum: dict | None) -> tuple[float, str, bool | str]:
+    """(drive_seconds, reason_suffix, stored_state) for a window command.
+
+    Close always overdrives to seat fully shut; open is full or partial depending
+    on wind/rain (weather.open_plan, fed the same summary that gets recorded with
+    the event so the decision and the history conditions can't diverge). The
+    suffix makes the depth visible in the history reason; the stored state
+    (False / "full" / "partial") keeps it visible in the live UI.
+    """
+    if action == "close":
+        return config.WINDOW_CLOSE_SECONDS, "", False
+    plan = weather.open_plan(wsum)
+    if plan["full"]:
+        return config.WINDOW_FULL_TRAVEL_SECONDS, " — ouverture complète", "full"
+    return (config.WINDOW_PARTIAL_OPEN_SECONDS,
+            f" — ouverture partielle ({plan['reason']})", "partial")
+
+
 @app.route("/toggle_window", methods=["POST"])
 @login_required
 def toggle_window():
@@ -331,7 +354,8 @@ def toggle_window():
     actor = session.get("user")
     conditions = weather.latest()
 
-    success, message = send_window_command(building, window, action)
+    duration, depth_suffix, new_status = _drive_command(action, conditions)
+    success, message = send_window_command(building, window, action, duration)
     if not success:
         # Don't persist a state we failed to apply, but do record the attempt.
         db.record_event(action, building=building, window=window, source="manual",
@@ -342,17 +366,19 @@ def toggle_window():
                     f"« {ACTION_FR.get(action, action).lower()} » échouée — {message}")
         return jsonify({"success": False, "error": message}), 502
 
-    window_opened[building][window] = new_state
+    window_opened[building][window] = new_status
     save_status(window_opened)
     db.record_event(action, building=building, window=window, source="manual",
-                    actor=actor, reason="Action manuelle", success=True,
+                    actor=actor, reason="Action manuelle" + depth_suffix, success=True,
                     conditions=conditions)
     if config.NOTIFY_MANUAL_ACTIONS:
         event = "window_opened" if new_state else "window_closed"
         verb = "ouverte" if new_state else "fermée"
         notify.send(event, f"Fenêtre {verb}",
                     f"{window_label(building, window)} {verb} manuellement par {actor}.")
-    return jsonify({"success": True, "new_state": new_state, "message": message})
+    return jsonify({"success": True, "new_state": new_state,
+                    "depth": new_status or None,
+                    "message": message + depth_suffix})
 
 
 @app.route("/all/<action>", methods=["POST"])
@@ -367,20 +393,24 @@ def control_all_buildings(action):
     actor = session.get("user")
     conditions = weather.latest()
     bulk_reason = f"Action groupée — tout {'ouvrir' if action == 'open' else 'fermer'}"
+    # Same conditions for the whole bulk, so decide depth once — every window is
+    # driven identically (open partial/full together, close overdriven together).
+    duration, depth_suffix, new_status = _drive_command(action, conditions)
 
     for building_id, window_list in config.BUILDINGS.items():
         if building_id not in config.EQUIPPED_BUILDINGS:
             continue
         for window_id in window_list:
-            success, message = send_window_command(building_id, window_id, action)
+            success, message = send_window_command(building_id, window_id, action, duration)
             if success:
-                window_opened[building_id][window_id] = (action == "open")
+                window_opened[building_id][window_id] = new_status
             else:
                 failures.append(f"{building_id}/{window_id}: {message}")
             db.record_event(
                 action, building=building_id, window=window_id, source="manual",
                 actor=actor,
-                reason=bulk_reason if success else f"{bulk_reason} — échec : {message}",
+                reason=(bulk_reason + depth_suffix) if success
+                else f"{bulk_reason} — échec : {message}",
                 success=success, conditions=conditions,
             )
 
@@ -402,7 +432,7 @@ def control_all_buildings(action):
         flash(f"{label} partielle — {len(failures)} erreur(s) : " + "; ".join(failures),
               "warning")
     else:
-        flash(f"{label} envoyée à toutes les fenêtres équipées", "success")
+        flash(f"{label} envoyée à toutes les fenêtres équipées{depth_suffix}", "success")
     return redirect(url_for("home"))
 
 

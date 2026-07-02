@@ -31,8 +31,21 @@ Browser ──HTTP──> Flask (app.py) ──Modbus/TCP──> Relay module �
 - `status.json` — Latest window state, created on first write
 
 Each window uses two relay channels (open / close). `send_window_command`
-pulses the relevant channel; `ModbusTCPClient` schedules an automatic
-all-relays-off 10 s later so motors aren't left energised.
+pulses the relevant channel for a caller-supplied drive time, then schedules an
+automatic all-relays-off once it elapses so motors aren't left energised. Travel
+is purely timed (no position feedback), so that duration sets how far the window
+moves: closing overdrives past full travel to seat shut, while opening is full or
+partial (`config.WINDOW_*_SECONDS`, derived from the measured full-travel time
+unless pinned, and validated at startup) depending on wind and rain risk.
+
+Each window has its *own* release timer that zeroes just its two coils after
+exactly its drive time, so overlapping commands on one board (say a 30 s close
+then a 10 s partial open on another window) can neither cut each other short
+nor stretch a partial open into a full one. A board-wide all-relays-off
+backstop is also armed at the furthest requested deadline, in case a window
+release fails. A command that fails after a coil write may have gone out arms
+a short failsafe release instead, so a contactor can't stay energised on a
+command the app reported as failed.
 
 ## History & weather
 

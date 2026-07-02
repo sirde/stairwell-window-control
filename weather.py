@@ -125,27 +125,32 @@ def _storm_eta(times: list, codes: list, start: int, end: int, now: str) -> str 
     return None
 
 
-def _venting_allowed(current: dict, daily: dict) -> bool | None:
+def _daily_today(daily: dict, key: str, now: str | None) -> str | None:
+    """Today's entry (same calendar date as `now`) from a daily series, or None."""
+    if not now:
+        return None
+    return next((s for s in (daily.get(key) or []) if s and s[:10] == now[:10]), None)
+
+
+def _venting_allowed(current: dict, sunrise: str | None) -> bool | None:
     """Is *now* inside the night-airing window (auto-open gate)?
 
     The window is the whole night plus a grace period past sunrise: a south-facing
     roof barely heats in the first hours after dawn (sun still low in the NE) and
     the coolest outdoor air is right after sunrise, so venting stays worthwhile
     for `MORNING_VENT_GRACE_HOURS` past it. The night side comes from Open-Meteo's
-    `is_day` flag (0 = night); this only bolts the morning grace on top.
+    `is_day` flag (0 = night); `sunrise` (today's, from _daily_today) only bolts
+    the morning grace on top.
 
-    Returns None when the sun times / clock can't be read, so the caller can fall
-    back to the old temperature-only behaviour rather than freeze the feature.
+    Returns None when neither part can be evaluated, so the caller can fall
+    back to the old temperature-only behaviour — and flag the gap — rather than
+    freeze the feature.
     """
     now = current.get("time")
     is_day = current.get("is_day")
-    if not now:
-        return None if is_day is None else (is_day == 0)
-    sunrises = daily.get("sunrise") or []
-    sr = next((s for s in sunrises if s[:10] == now[:10]), sunrises[0] if sunrises else None)
     try:
-        now_dt = datetime.strptime(now, "%Y-%m-%dT%H:%M")
-        sunrise_dt = datetime.strptime(sr, "%Y-%m-%dT%H:%M") if sr else None
+        now_dt = datetime.strptime(now, "%Y-%m-%dT%H:%M") if now else None
+        sunrise_dt = datetime.strptime(sunrise, "%Y-%m-%dT%H:%M") if sunrise else None
     except (ValueError, TypeError):
         now_dt = sunrise_dt = None
 
@@ -191,19 +196,25 @@ def _summarise(data: dict, model: str) -> dict:
 
     rain_prob = max(window_probs) if window_probs else 0
     precip_mm = round(sum(window_precs), 1)
-    wind_gust = max(window_gusts) if window_gusts else (current.get("wind_gusts_10m") or 0)
+    # The live observed gust counts alongside the forecast window: an
+    # unforecast squall happening right now must be able to raise the signal.
+    current_gust = current.get("wind_gusts_10m") or 0
+    wind_gust = max([current_gust, *window_gusts])
     cape_max = round(max(window_capes)) if window_capes else 0
     temp_c = current.get("temperature_2m")
     storm_now = current.get("weathercode") in STORM_CODES
     storm_eta = _storm_eta(times, codes, start, watch_end, now)
 
-    # Night-airing time gate for auto-open. None (undeterminable) collapses to
-    # True so a data hiccup falls back to the old temperature-only behaviour.
-    venting = _venting_allowed(current, daily)
-    sunrise_today = next((s for s in (daily.get("sunrise") or [])
-                          if now and s[:10] == now[:10]), None)
-    sunset_today = next((s for s in (daily.get("sunset") or [])
-                         if now and s[:10] == now[:10]), None)
+    # Night-airing time gate for auto-open. Undeterminable (missing is_day /
+    # sun times) collapses to True — the old temperature-only behaviour — but
+    # is flagged as venting_unknown and logged, so a data gap can never
+    # silently pass for "night".
+    sunrise_today = _daily_today(daily, "sunrise", now)
+    sunset_today = _daily_today(daily, "sunset", now)
+    venting = _venting_allowed(current, sunrise_today)
+    if venting is None:
+        log.warning("Night-airing gate undeterminable (is_day / current time "
+                    "missing) — failing open to temperature-only behaviour")
 
     # --- Forecast inputs to the close decision (combined with radar elsewhere) ---
     high_wind = wind_gust >= config.WIND_GUST_THRESHOLD_KMH
@@ -235,6 +246,7 @@ def _summarise(data: dict, model: str) -> dict:
         "sunrise": sunrise_today,
         "sunset": sunset_today,
         "venting_ok": True if venting is None else venting,
+        "venting_unknown": venting is None,
         "high_wind": high_wind,
         "forecast_rain": forecast_rain,
         "forecast_rain_detail": forecast_rain_detail,
@@ -293,6 +305,39 @@ def close_decision(wsum: dict, rsum: dict | None) -> dict:
         "rain_detail": rain_detail,
         "rain_source": "radar" if radar_rain else ("forecast" if forecast_rain else None),
     }
+
+
+def open_plan(wsum: dict | None = None, rsum: dict | None = None) -> dict:
+    """How far to open right now, and why.
+
+    Fully open only when the forecast is fresh AND calm AND dry: gust below
+    WIND_FULL_OPEN_MAX_KMH and no rain signal (radar or forecast, same source
+    the close advisory uses). Anything breezier or any rain risk gets a partial
+    ("cracked") open. Unknown or stale conditions (no forecast yet, or the
+    poller degraded — see evaluate_staleness) fall back to partial — the
+    cautious choice.
+
+    Callers that already hold a summary (e.g. to record it with the event)
+    should pass it in, so the depth decision and the recorded conditions come
+    from the same snapshot.
+
+    Returns {"full": bool, "reason": str | None}; reason is None when fully open.
+    """
+    if wsum is None:
+        wsum = latest()
+    if rsum is None:
+        rsum = radar.latest()
+    if wsum is None:
+        return {"full": False, "reason": "conditions inconnues"}
+    with _degraded_lock:
+        if _degraded:
+            return {"full": False, "reason": "météo indisponible"}
+    gust = wsum.get("wind_gust_kmh") or 0
+    rain = close_decision(wsum, rsum)["rain"]
+    if gust < config.WIND_FULL_OPEN_MAX_KMH and not rain:
+        return {"full": True, "reason": None}
+    reason = "risque de pluie" if rain else f"vent {round(gust)} km/h"
+    return {"full": False, "reason": reason}
 
 
 def current() -> dict | None:
@@ -358,6 +403,31 @@ def evaluate_close(status_provider) -> None:
             _advised.clear()
 
 
+def _open_favourable(settings: dict, wsum: dict, decision: dict) -> bool:
+    """Single definition of "auto-open would fire right now", shared by the
+    history logger (evaluate_open) and the push notifier (notify_weather) so
+    the two can't drift.
+
+    Favourable = enabled AND forecast fresh (a degraded poller means venting_ok
+    and temp are frozen at whatever the last fetch saw — not trustable) AND
+    inside the night-airing window (whole night + morning grace, see
+    _venting_allowed) AND cool enough AND nothing that would advise closing
+    (advise_close already means high wind OR rain — so its negation is
+    "wind OK and no rain").
+    """
+    with _degraded_lock:
+        degraded = _degraded
+    temp = wsum.get("temp_c")
+    return bool(
+        settings["open_enabled"]
+        and not degraded
+        and wsum.get("venting_ok", True)
+        and temp is not None
+        and temp < settings["open_temp_c"]
+        and not decision["advise_close"]
+    )
+
+
 def evaluate_open(status_provider) -> None:
     """Rising-edge log a *simulated* auto-open when it's cool, calm and dry.
 
@@ -378,18 +448,7 @@ def evaluate_open(status_provider) -> None:
     rsum = radar.latest()
     decision = close_decision(wsum, rsum)
 
-    # Favourable = enabled AND inside the night-airing window AND cool enough AND
-    # nothing that would advise closing (advise_close already means high wind OR
-    # rain — so its negation is "wind OK and no rain"). The night gate keeps us
-    # from importing hot daytime air; venting_ok is the whole night + a grace
-    # period past sunrise (see _venting_allowed).
-    favourable = (
-        settings["open_enabled"]
-        and wsum.get("venting_ok", True)
-        and temp is not None
-        and temp < threshold
-        and not decision["advise_close"]
-    )
+    favourable = _open_favourable(settings, wsum, decision)
 
     status = status_provider()
     closed_equipped = {
@@ -452,7 +511,6 @@ def notify_weather() -> None:
     settings = db.get_automation()
     advise = decision["advise_close"]
     caution = bool(wsum.get("caution"))
-    temp = wsum.get("temp_c")
     threshold = settings["open_temp_c"]
     temps = notify.format_temps(wsum)
 
@@ -482,10 +540,7 @@ def notify_weather() -> None:
             logs.append(("caution", f"Vigilance météo — {reasons}"))
             _weather_alerted = True
 
-        # Mirror evaluate_open's favourable test (enabled, night window, cool,
-        # calm, dry).
-        favourable = (settings["open_enabled"] and wsum.get("venting_ok", True)
-                      and temp is not None and temp < threshold and not advise)
+        favourable = _open_favourable(settings, wsum, decision)
         if favourable and not _notified_open:
             pending.append(("auto_opened", "Ouverture (simulation)",
                             _msg(f"Conditions favorables — sans vent ni pluie, "

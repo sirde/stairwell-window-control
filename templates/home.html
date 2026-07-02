@@ -25,6 +25,7 @@
         <div class="wx-metric" id="wx-cape-box"><div class="v" id="wx-cape">—</div><div class="k">Orage (CAPE)</div></div>
     </div>
     <div class="wx-advice muted" id="wx-advice">Chargement de la météo…</div>
+    <div class="wx-vent" id="wx-vent"></div>
     <div class="wx-radar-wrap" id="wx-radar-wrap">
         <div class="wx-radar" id="wx-radar">🛰️ Radar : —</div>
         <div class="radar-pop" id="radar-pop">
@@ -70,8 +71,10 @@
             </label>
             <div class="ao-text">
                 <div class="ao-title">Ouverture automatique</div>
-                <div class="ao-sub">Ouvre quand l'air est <strong>frais et calme</strong> (vent OK,
-                    pas de pluie) et que la température passe sous le seuil.</div>
+                <div class="ao-sub">Ouvre pendant la <strong>nuit</strong> (jusqu'à
+                    {{ morning_grace }} h après le lever du soleil) quand l'air est
+                    <strong>frais et calme</strong> (vent OK, pas de pluie) et que la
+                    température passe sous le seuil.</div>
             </div>
         </div>
         <div class="ao-threshold {% if not automation.open_enabled %}off{% endif %}" id="ao-threshold">
@@ -118,7 +121,7 @@
                     </div>
                     <span class="wstate">
                         <span class="wshape"></span>
-                        <span class="wstate-label">{% if status %}Ouverte{% else %}Fermée{% endif %}</span>
+                        <span class="wstate-label">{% if status == 'partial' %}Entrouverte{% elif status %}Ouverte{% else %}Fermée{% endif %}</span>
                     </span>
                 </{% if interactive %}button{% else %}div{% endif %}>
             {% endfor %}
@@ -138,7 +141,8 @@ function updateStatuses() {
                     el.classList.remove('open', 'closed');
                     el.classList.add(status ? 'open' : 'closed');
                     const label = el.querySelector('.wstate-label');
-                    if (label) label.textContent = status ? 'Ouverte' : 'Fermée';
+                    if (label) label.textContent =
+                        status === 'partial' ? 'Entrouverte' : (status ? 'Ouverte' : 'Fermée');
                 }
             }
         })
@@ -163,6 +167,9 @@ function toggleWindow(building, windowId) {
     .then(({ ok, data }) => {
         if (ok && data.success) {
             updateStatuses();
+            // The message carries the depth actually driven ("ouverture
+            // partielle (vent 25 km/h)") — the tile alone can't show why.
+            if (data.message) showToast(data.message);
         } else {
             showToast(data.error || 'Erreur inconnue', true);
         }
@@ -180,6 +187,7 @@ function renderWeather(data) {
         advice.className = 'wx-advice muted';
         advice.textContent = 'Météo en cours de chargement…';
         fetched.textContent = '';
+        document.getElementById('wx-vent').textContent = '';
         return;
     }
 
@@ -205,6 +213,20 @@ function renderWeather(data) {
     } else {
         advice.className = 'wx-advice';
         advice.textContent = 'Conditions OK — pas de fermeture nécessaire.';
+    }
+
+    // Night-airing window (the auto-open time gate): say whether it is open
+    // right now, so "auto-open enabled but nothing happens" is explainable.
+    const vent = document.getElementById('wx-vent');
+    if (data.venting_ok === undefined) {
+        vent.textContent = '';
+    } else if (data.venting_unknown) {
+        vent.textContent = '🌙 Aération nocturne : créneau indéterminable (donnée solaire manquante)';
+    } else if (data.venting_ok) {
+        vent.textContent = '🌙 Aération nocturne : créneau en cours';
+    } else {
+        vent.textContent = '☀️ Aération nocturne : hors créneau'
+            + (data.sunset ? ` — reprend à la nuit (vers ${data.sunset.slice(11, 16)})` : '');
     }
 
     if (data.fetched_at) {
@@ -303,7 +325,7 @@ acEnabled.addEventListener('change', () => {
 aoEnabled.addEventListener('change', () => {
     reflectAutomation();
     saveAutomation({ open_enabled: aoEnabled.checked },
-        aoEnabled.checked ? `Ouverture auto simulée activée — sous ${aoTemp.value} °C`
+        aoEnabled.checked ? `Ouverture auto simulée activée — la nuit, sous ${aoTemp.value} °C`
                           : 'Ouverture auto simulée désactivée');
 });
 aoTemp.addEventListener('input', () => { aoTempVal.textContent = aoTemp.value; });
