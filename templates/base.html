@@ -278,6 +278,31 @@
         }
         .wx-vent { margin-top: 8px; font-size: 12px; color: var(--muted); }
         .wx-vent:empty { display: none; }
+        /* Settings page (/config) */
+        .cfg-note { font-size: 12px; color: var(--muted); }
+        .cfg-group-title {
+            font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
+            color: var(--muted); margin-bottom: 6px;
+        }
+        .cfg-row {
+            display: flex; gap: 12px; align-items: center;
+            justify-content: space-between; padding: 10px 0;
+        }
+        .cfg-row + .cfg-row { border-top: 1px solid var(--border); }
+        .cfg-label { font-size: 13px; font-weight: 600; }
+        .cfg-help { font-size: 11px; color: var(--muted); margin-top: 2px; max-width: 420px; }
+        .cfg-input { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+        .cfg-input input {
+            width: 96px; padding: 6px 8px; font-size: 14px; text-align: right;
+            border: 1px solid var(--border); border-radius: 8px;
+            background: var(--canvas); color: inherit;
+        }
+        .cfg-input input::placeholder { color: var(--muted); opacity: .8; }
+        .cfg-unit { font-size: 12px; color: var(--muted); min-width: 34px; }
+        .btn-cfg-save {
+            background: var(--accent); border-color: var(--accent); color: #fff;
+            padding: 10px; border-radius: 10px; font-weight: 600;
+        }
         .wx-radar {
             margin-top: 8px; font-size: 12px; color: var(--muted);
             display: flex; align-items: center; gap: 6px;
@@ -371,6 +396,8 @@
                    style="color: var(--accent); font-size:12px;">Conditions</a>
                 <a href="{{ url_for('history') }}" class="btn btn-link btn-sm text-decoration-none"
                    style="color: var(--accent); font-size:12px;">Historique</a>
+                <a href="{{ url_for('config_page') }}" class="btn btn-link btn-sm text-decoration-none"
+                   style="color: var(--accent); font-size:12px;">Réglages</a>
                 <span class="admin-badge">Admin</span>
                 <a href="{{ url_for('logout') }}" class="btn btn-link btn-sm text-decoration-none ms-1"
                    style="color: var(--muted); font-size:12px;">Déconnexion</a>
@@ -399,5 +426,15 @@
     </main>
 
     <div id="cmd-toast" class="cmd-toast" role="status" aria-live="polite"></div>
+    <script>
+        // Shared feedback toast (used by the home and settings pages).
+        function showToast(message, isError) {
+            const t = document.getElementById('cmd-toast');
+            t.textContent = message;
+            t.classList.toggle('error', !!isError);
+            t.classList.add('show');
+            setTimeout(() => t.classList.remove('show'), 4000);
+        }
+    </script>
 </body>
 </html>

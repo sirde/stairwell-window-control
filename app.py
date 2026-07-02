@@ -1,3 +1,4 @@
+import importlib
 import io
 import json
 import logging
@@ -15,6 +16,7 @@ import config
 import db
 import notify
 import radar
+import settings_env
 import weather
 from modbus_tcp import send_window_command
 from notifier import heartbeat
@@ -304,6 +306,81 @@ def settings_automation():
     except Exception:
         log.exception("Automation re-evaluation after settings change failed")
     return jsonify({"success": True, **saved})
+
+
+@app.route("/config")
+@login_required
+def config_page():
+    """Settings page: the tunables from settings_env's schema, grouped."""
+    overrides = settings_env.load_overrides()
+    groups: dict[str, list[dict]] = {}
+    for f in settings_env.FIELDS:
+        effective = getattr(config, f["key"])
+        groups.setdefault(f["group"], []).append({
+            "key": f["key"], "label": f["label"], "help": f["help"],
+            "unit": f["unit"], "min": f["min"], "max": f["max"], "step": f["step"],
+            "pinned": overrides.get(f["key"], ""),
+            "effective": f"{effective:g}",
+        })
+    return render_template(
+        "config.html",
+        groups=groups,
+        automation=db.get_automation(),
+        auto_open_min=db.AUTO_OPEN_TEMP_MIN,
+        auto_open_max=db.AUTO_OPEN_TEMP_MAX,
+        settings_file=settings_env.path(),
+    )
+
+
+@app.route("/settings/config", methods=["POST"])
+@login_required
+def settings_config():
+    """Save the /config page to the env overrides file and apply live.
+
+    The payload is the COMPLETE set of schema keys: an empty value unpins the
+    key (falls back to environment / derived / default). The overrides file is
+    rewritten atomically, then config is reloaded in place so every consumer
+    sees the new values immediately — thresholds already baked into the current
+    forecast summary take effect at the next poll.
+    """
+    data = request.get_json(silent=True) or {}
+    overrides: dict[str, str] = {}
+    errors: list[str] = []
+    for f in settings_env.FIELDS:
+        raw = str(data.get(f["key"], "") or "").strip()
+        if not raw:
+            continue
+        if settings_env.parse_field(f, raw) is None:
+            errors.append(f"{f['label']} : valeur invalide "
+                          f"({f['min']:g}–{f['max']:g} {f['unit']}).")
+        else:
+            overrides[f["key"]] = raw
+    if not errors:
+        errors.extend(settings_env.cross_errors(settings_env.effective_values(overrides)))
+
+    open_temp = str(data.get("open_temp_c", "") or "").strip()
+    if open_temp:
+        try:
+            int(open_temp)
+        except ValueError:
+            errors.append("Seuil d'ouverture : valeur invalide.")
+
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 400
+
+    settings_env.save_overrides(overrides)
+    importlib.reload(config)  # re-resolves through the file just written
+    if open_temp:
+        db.set_automation(open_temp_c=int(open_temp))
+    log.info("Config updated by %s: %s", session.get("user"),
+             overrides or "(tout par défaut)")
+    # Re-evaluate at once so a threshold change shows its effect (advisory /
+    # simulated open) without waiting for the next poll.
+    try:
+        weather.evaluate(load_status)
+    except Exception:
+        log.exception("Re-evaluation after config change failed")
+    return jsonify({"success": True})
 
 
 @app.route("/history")

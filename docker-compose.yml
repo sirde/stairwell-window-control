@@ -18,5 +18,9 @@ services:
     environment:
       STATUS_FILE: /app/data/status.json
       DB_FILE: /app/data/extracteur.db
+      # Tunables saved from the UI settings page (/config); on the bind mount
+      # so they survive restarts/recreates. These override defaults.env /
+      # extracteur.env for the keys they pin (schema in settings_env.py).
+      SETTINGS_ENV_FILE: /app/data/settings.env
     volumes:
       - ./data:/app/data

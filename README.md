@@ -161,8 +161,9 @@ directly, see **Administering the building network (VPN)** below.
 
 ## Configuration
 
-Config comes from environment variables, split across **two files by stability**
-so shared defaults propagate through git while secrets stay per-machine:
+Config comes from environment variables, split across **three files by
+stability** so shared defaults propagate through git, secrets stay per-machine,
+and day-to-day tuning needs no shell at all:
 
 - **`defaults.env`** — *committed.* Every non-secret tunable (weather thresholds,
   radar, ntfy enable/server, poll intervals, timezone…) at its production
@@ -174,11 +175,20 @@ so shared defaults propagate through git while secrets stay per-machine:
   values (`NTFY_TOPIC`, `NTFY_TOKEN`, `PUBLIC_BASE_URL`, `HEALTHCHECK_URL`).
   Copy it from `extracteur.env.example` and fill it in. It's small and rarely
   changes.
+- **`settings.env`** — *app-managed* (`SETTINGS_ENV_FILE`, `/app/data/settings.env`
+  in Docker so it sits on the bind mount). Written by the **Réglages** page
+  (`/config`), where a logged-in admin can tune drive durations, wind/rain/CAPE
+  thresholds, the night-airing grace and the stale-weather delays. Saved values
+  apply immediately (no restart — the app reloads its config in place) and take
+  precedence over both files above; an empty field falls back to the
+  environment / derived value shown in grey. Delete a line (or the file) to
+  hand the key back to the environment.
 
-Compose layers them (`defaults.env` first, then `extracteur.env` overriding),
-and every non-secret key also has a matching default in code — so a machine
-missing `defaults.env` still runs, and only the 7 required secrets are truly
-mandatory (the app fails fast with a clear message listing any that are absent).
+Compose layers the first two (`defaults.env` first, then `extracteur.env`
+overriding), and every non-secret key also has a matching default in code — so
+a machine missing `defaults.env` still runs, and only the 7 required secrets
+are truly mandatory (the app fails fast with a clear message listing any that
+are absent). The UI-tunable subset and its bounds live in `settings_env.py`.
 
 > `extracteur.env` is intentionally **not** named `.env`: Docker Compose
 > auto-loads `.env` for YAML interpolation, which mangles werkzeug password

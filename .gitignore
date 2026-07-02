@@ -9,6 +9,7 @@ env/
 .env.*
 extracteur.env
 !extracteur.env.example
+settings.env
 
 status.json
 extracteur.db

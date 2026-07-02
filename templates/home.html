@@ -149,14 +149,6 @@ function updateStatuses() {
         .catch(err => console.error('Erreur de rafraîchissement :', err));
 }
 
-function showToast(message, isError) {
-    const t = document.getElementById('cmd-toast');
-    t.textContent = message;
-    t.classList.toggle('error', !!isError);
-    t.classList.add('show');
-    setTimeout(() => t.classList.remove('show'), 4000);
-}
-
 function toggleWindow(building, windowId) {
     fetch('/toggle_window', {
         method: 'POST',

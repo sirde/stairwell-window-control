@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Réglages — Extracteurs{% endblock %}
+
+{% block content %}
+
+<div class="section-eyebrow">Réglages — durées &amp; seuils</div>
+
+<div class="building-card mb-3">
+    <div class="cfg-note">
+        Champ vide = valeur héritée (affichée en grisé) : dérivée de la course ou
+        reprise de l'environnement. Les valeurs saisies sont enregistrées dans
+        <code>{{ settings_file }}</code> et appliquées immédiatement ; les seuils
+        météo déjà intégrés au dernier relevé sont pris en compte au relevé
+        suivant (&le; 10&nbsp;min).
+    </div>
+</div>
+
+<form id="cfg-form">
+{% for group, fields in groups.items() %}
+    <div class="building-card mb-3">
+        <div class="cfg-group-title">{{ group }}</div>
+        {% for f in fields %}
+            <div class="cfg-row">
+                <label for="cfg-{{ f.key }}">
+                    <div class="cfg-label">{{ f.label }}</div>
+                    <div class="cfg-help">{{ f.help }}</div>
+                </label>
+                <div class="cfg-input">
+                    <input type="number" id="cfg-{{ f.key }}" data-key="{{ f.key }}"
+                           value="{{ f.pinned }}" placeholder="{{ f.effective }}"
+                           min="{{ f.min }}" max="{{ f.max }}" step="{{ f.step }}"
+                           inputmode="decimal">
+                    <span class="cfg-unit">{{ f.unit }}</span>
+                </div>
+            </div>
+        {% endfor %}
+    </div>
+{% endfor %}
+
+    <div class="building-card mb-3">
+        <div class="cfg-group-title">Automatisation</div>
+        <div class="cfg-row">
+            <label for="cfg-open-temp">
+                <div class="cfg-label">Seuil d'ouverture automatique</div>
+                <div class="cfg-help">Ouvre (simulation) sous cette température,
+                    la nuit, par temps calme et sec. Aussi réglable depuis
+                    l'accueil — enregistré en base, pas dans le fichier.</div>
+            </label>
+            <div class="cfg-input">
+                <input type="number" id="cfg-open-temp"
+                       value="{{ automation.open_temp_c }}"
+                       min="{{ auto_open_min }}" max="{{ auto_open_max }}" step="1">
+                <span class="cfg-unit">°C</span>
+            </div>
+        </div>
+    </div>
+
+    <button type="submit" class="btn btn-cfg-save w-100">Enregistrer</button>
+</form>
+
+<script>
+document.getElementById('cfg-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const payload = {};
+    document.querySelectorAll('#cfg-form input[data-key]')
+        .forEach(i => { payload[i.dataset.key] = i.value.trim(); });
+    payload.open_temp_c = document.getElementById('cfg-open-temp').value.trim();
+    fetch('/settings/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+    .then(r => r.json().then(data => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+        if (ok && data.success) {
+            showToast('Réglages enregistrés');
+            // Reload so placeholders reflect the new derived/effective values.
+            setTimeout(() => location.reload(), 700);
+        } else {
+            showToast((data.errors || [data.error || 'Erreur inconnue']).join(' '), true);
+        }
+    })
+    .catch(err => showToast('Erreur réseau : ' + err, true));
+});
+</script>
+
+{% endblock %}

@@ -1,5 +1,7 @@
 import os
 
+import settings_env
+
 
 # Fail fast with one clear message if a required secret is missing, instead of a
 # raw KeyError from the first bare os.environ[...] below. These are the only vars
@@ -40,38 +42,27 @@ EQUIPPED_BUILDINGS = {
     if b.strip()
 }
 
+# --- UI-tunable settings (schema in settings_env.py, edited at /config) -------
+# Resolution: settings.env (saved from the UI) > process environment
+# (defaults.env / extracteur.env) > derived / code default. Values are
+# validated by the schema — bad UI overrides are dropped with a warning, bad
+# environment values abort startup loudly (a silently-accepted 0-second drive
+# would "succeed" every command without moving a motor). Saving from the UI
+# rewrites settings.env and reloads this module, so changes apply live.
+_TUNABLES = settings_env.effective_values(settings_env.load_overrides())
+
 # --- Window drive durations --------------------------------------------------
 # Seconds the motor is powered per command. There are no position/limit feedback
 # contacts, so travel is timed: the relay coil is held on for this long, then a
-# board-wide "all relays off" releases the contactor (see modbus_tcp.py).
+# per-window release (plus board-wide backstop) cuts it (see modbus_tcp.py).
 #
 # WINDOW_FULL_TRAVEL_SECONDS is the measured time from fully shut to fully open.
-# Close and partial default off it (and follow it if you retune), but each can be
-# pinned independently via env.
-#
-# Durations are validated hard at startup: a silently-accepted 0 or negative
-# would fire the all-relays-off immediately, so every command "succeeds" and the
-# UI records the new state while no motor ever moves.
-def _duration_env(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    try:
-        value = float(raw) if raw not in (None, "") else float(default)
-    except ValueError:
-        raise SystemExit(f"{name}={raw!r} : not a number (drive duration in seconds)")
-    if not 0 < value <= 120:
-        raise SystemExit(f"{name}={raw!r} : drive duration must be in (0, 120] seconds")
-    return value
-
-
-WINDOW_FULL_TRAVEL_SECONDS = _duration_env("WINDOW_FULL_TRAVEL_SECONDS", 20)
-# Closing overdrives past full travel so the window always seats fully shut.
-# Overdriving is safe — the motor simply stalls against the frame, exactly as it
-# does when you hold the hand switch closed. Default: full travel + 10 s margin.
-WINDOW_CLOSE_SECONDS = _duration_env(
-    "WINDOW_CLOSE_SECONDS", WINDOW_FULL_TRAVEL_SECONDS + 10)
-# "Cracked" open used when it is breezy or rain is possible. Default: half travel.
-WINDOW_PARTIAL_OPEN_SECONDS = _duration_env(
-    "WINDOW_PARTIAL_OPEN_SECONDS", WINDOW_FULL_TRAVEL_SECONDS / 2)
+# Close overdrives past it (motor stalls harmlessly at the frame) so the window
+# always seats shut; partial is the "cracked" open for breezy/wet conditions.
+# Close and partial derive from full travel (full+10 / full/2) unless pinned.
+WINDOW_FULL_TRAVEL_SECONDS = _TUNABLES["WINDOW_FULL_TRAVEL_SECONDS"]
+WINDOW_CLOSE_SECONDS = _TUNABLES["WINDOW_CLOSE_SECONDS"]
+WINDOW_PARTIAL_OPEN_SECONDS = _TUNABLES["WINDOW_PARTIAL_OPEN_SECONDS"]
 
 # --- Weather (Open-Meteo, no API key) ----------------------------------------
 # Location of the residence. Falls back to the older OPENWEATHER_* names so an
@@ -95,21 +86,21 @@ WEATHER_MODELS = [m.strip() for m in os.environ.get(
 # Two-tier horizon: imminent rain/wind that warrants closing *now*, and a longer
 # thunderstorm "watch" because storms are usually hours out (gusts at the grid
 # point under-call them, so we trigger on the model's thunderstorm code instead).
-WEATHER_LOOKAHEAD_HOURS = int(os.environ.get("WEATHER_LOOKAHEAD_HOURS", "3"))
-WEATHER_WATCH_HOURS = int(os.environ.get("WEATHER_WATCH_HOURS", "12"))
+WEATHER_LOOKAHEAD_HOURS = _TUNABLES["WEATHER_LOOKAHEAD_HOURS"]
+WEATHER_WATCH_HOURS = _TUNABLES["WEATHER_WATCH_HOURS"]
 
 # Advise closing when the forecast crosses either threshold within the lookahead.
-RAIN_PROB_THRESHOLD = int(os.environ.get("RAIN_PROB_THRESHOLD", "60"))        # %
-WIND_GUST_THRESHOLD_KMH = float(os.environ.get("WIND_GUST_THRESHOLD_KMH", "40"))
+RAIN_PROB_THRESHOLD = _TUNABLES["RAIN_PROB_THRESHOLD"]                         # %
+WIND_GUST_THRESHOLD_KMH = _TUNABLES["WIND_GUST_THRESHOLD_KMH"]
 
 # Fully open a window only when the gust forecast is below this AND there is no
 # rain signal; otherwise open partially. This is the *lower* companion to
 # WIND_GUST_THRESHOLD_KMH (which advises closing): below it = fully open, above
 # WIND_GUST_THRESHOLD_KMH = close, and the band between = partial ("cracked") open.
-WIND_FULL_OPEN_MAX_KMH = float(os.environ.get("WIND_FULL_OPEN_MAX_KMH", "20"))
+WIND_FULL_OPEN_MAX_KMH = _TUNABLES["WIND_FULL_OPEN_MAX_KMH"]
 
 # CAPE (convective fuel) shown for context and flagged above this value (J/kg).
-CAPE_THRESHOLD = float(os.environ.get("CAPE_THRESHOLD", "1000"))
+CAPE_THRESHOLD = _TUNABLES["CAPE_THRESHOLD"]
 
 # --- Night-airing time gate (auto-open) --------------------------------------
 # Auto-open (cooling) is limited to the cool part of the day: the whole night
@@ -119,15 +110,15 @@ CAPE_THRESHOLD = float(os.environ.get("CAPE_THRESHOLD", "1000"))
 # many hours past sunrise before the day's solar gain makes importing outside air
 # counter-productive. The night side of the window comes from Open-Meteo's
 # is_day flag; this only extends the morning cutoff.
-MORNING_VENT_GRACE_HOURS = float(os.environ.get("MORNING_VENT_GRACE_HOURS", "2"))
+MORNING_VENT_GRACE_HOURS = _TUNABLES["MORNING_VENT_GRACE_HOURS"]
 
 # Graceful degradation when the forecast can't be fetched: fall back to the LAST
 # known state. A "touchy" last reading (wind / rain / storm risk) gets a short
 # grace period before a precautionary close — being blind during risk is the
 # dangerous case. A calm last reading (no wind, no rain) tolerates a much longer
 # outage before reacting.
-WEATHER_STALE_RISKY_SECONDS = int(os.environ.get("WEATHER_STALE_RISKY_SECONDS", "600"))   # 10 min
-WEATHER_STALE_CALM_SECONDS = int(os.environ.get("WEATHER_STALE_CALM_SECONDS", "5400"))    # 90 min
+WEATHER_STALE_RISKY_SECONDS = _TUNABLES["WEATHER_STALE_RISKY_SECONDS"]   # 10 min default
+WEATHER_STALE_CALM_SECONDS = _TUNABLES["WEATHER_STALE_CALM_SECONDS"]     # 90 min default
 
 # --- Radar nowcast (RainViewer, free, no key) --------------------------------
 # Observe-only: detects rain on/near the residence that forecasts miss. Needs
