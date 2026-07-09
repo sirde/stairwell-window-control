@@ -1,52 +1,81 @@
 {% extends "base.html" %}
 {% block title %}Contrôle des extracteurs{% endblock %}
 
+{% block head %}
+<style>
+    /* Relay reachability (per building) — merged in on top of the design pass. */
+    .relay-down-pill {
+        font-size: 11px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase;
+        background: var(--closed-bg); color: var(--closed); border: 1px solid var(--closed-bd);
+        padding: 4px 9px; border-radius: 999px;
+    }
+    .relay-warning {
+        margin-bottom: 12px; padding: 10px 12px; border-radius: 10px;
+        font-size: 13px; font-weight: 600; display: flex; gap: 8px; align-items: flex-start;
+        border: 1px solid var(--closed-bd); background: var(--closed-bg); color: var(--closed);
+    }
+</style>
+{% endblock %}
+
 {% block content %}
 
 <div class="weather-banner mb-3">
     <div style="font-size:18px; line-height:1;">⚠️</div>
-    <div style="font-size:13px;">
+    <div style="font-size:13px;" data-i18n="home_banner">
         Cette interface permet d'aérer la cage d'escalier durant la nuit.
-        Il n'y a <strong>aucune protection automatique contre la pluie ou le vent</strong> —
-        pensez à refermer les fenêtres en cas de mauvaise météo, et le matin
-        lorsque la température monte.
+        Avant d'ouvrir, assurez-vous que la météo est clémente. Une protection
+        automatique existe (fermeture en cas de vent ou de pluie), mais elle ne
+        sert que de filet de sécurité — ne vous y fiez pas : refermez les
+        fenêtres en cas de mauvaise météo et le matin lorsque la température monte.
     </div>
 </div>
 
 <div class="weather-card mb-3" id="weather-card">
     <div class="wx-head">
-        <span class="wx-title">Météo · prévision Open-Meteo</span>
+        <span class="wx-title" data-i18n="wx_title">Météo · prévision Open-Meteo</span>
         <span class="wx-fetched" id="wx-fetched"></span>
     </div>
     <div class="weather-metrics">
-        <div class="wx-metric"><div class="v" id="wx-temp">—</div><div class="k">Température</div></div>
-        <div class="wx-metric"><div class="v" id="wx-rain">—</div><div class="k">Pluie (<span class="wx-look">3</span>h)</div></div>
-        <div class="wx-metric"><div class="v" id="wx-wind">—</div><div class="k">Rafales (<span class="wx-look">3</span>h)</div></div>
-        <div class="wx-metric" id="wx-cape-box"><div class="v" id="wx-cape">—</div><div class="k">Orage (CAPE)</div></div>
+        <div class="wx-metric"><div class="v" id="wx-temp">—</div><div class="k" data-i18n="wx_temp">Température</div></div>
+        <div class="wx-metric"><div class="v" id="wx-rain">—</div><div class="k"><span data-i18n="wx_rain">Pluie</span> (<span class="wx-look">3</span>h)</div></div>
+        <div class="wx-metric"><div class="v" id="wx-wind">—</div><div class="k"><span data-i18n="wx_wind">Rafales</span> (<span class="wx-look">3</span>h)</div></div>
+        <div class="wx-metric" id="wx-cape-box"><div class="v" id="wx-cape">—</div><div class="k" data-i18n="wx_cape">Orage (CAPE)</div></div>
+
+        <!-- Indoor temperature tile + sparkline. The sensor is not wired yet
+             (weather.json.temp_in_c arrives later); until then we show a subtle
+             placeholder rather than a broken value. -->
+        <div class="wx-metric wx-indoor" id="wx-indoor-box">
+            <div class="wx-indoor-l">
+                <div class="v" id="wx-indoor">—</div>
+                <div class="k" data-i18n="wx_indoor">Intérieur</div>
+                <div class="wx-soon" id="wx-indoor-soon" data-i18n="sensor_soon">capteur intérieur à venir</div>
+            </div>
+            <canvas class="wx-spark" id="indoor-spark" width="140" height="34" aria-hidden="true"></canvas>
+        </div>
     </div>
-    <div class="wx-advice muted" id="wx-advice">Chargement de la météo…</div>
+    <div class="wx-advice muted" id="wx-advice" data-i18n="wx_loading">Chargement de la météo…</div>
     <div class="wx-vent" id="wx-vent"></div>
     <div class="wx-radar-wrap" id="wx-radar-wrap">
         <div class="wx-radar" id="wx-radar">🛰️ Radar : —</div>
         <div class="radar-pop" id="radar-pop">
             <img id="radar-img" alt="Carte radar autour de la résidence">
-            <div class="radar-cap">Radar — rayon {{ radar_radius_km }} km autour de la résidence</div>
+            <div class="radar-cap"><span data-i18n="radar_cap">Radar — rayon</span> {{ radar_radius_km }} km</div>
         </div>
     </div>
 </div>
 
 {% if logged_in %}
-    <div class="section-eyebrow">Actions groupées</div>
+    <div class="section-eyebrow" data-i18n="sec_bulk">Actions groupées</div>
     <div class="bulk-actions mb-3">
         <form method="post" action="{{ url_for('control_all_buildings', action='open') }}">
-            <button type="submit" class="btn btn-bulk-open w-100">Tout ouvrir</button>
+            <button type="submit" class="btn btn-bulk-open w-100" data-i18n="bulk_open">Tout ouvrir</button>
         </form>
         <form method="post" action="{{ url_for('control_all_buildings', action='close') }}">
-            <button type="submit" class="btn btn-bulk-close w-100">Tout fermer</button>
+            <button type="submit" class="btn btn-bulk-close w-100" data-i18n="bulk_close">Tout fermer</button>
         </form>
     </div>
 
-    <div class="section-eyebrow">Automatisation (simulation)</div>
+    <div class="section-eyebrow" data-i18n="sec_auto">Automatisation</div>
     <div class="auto-open-card mb-3 {% if automation.open_enabled or automation.close_enabled %}on{% endif %}"
          id="automation-card">
 
@@ -56,9 +85,9 @@
                 <span class="ao-slider"></span>
             </label>
             <div class="ao-text">
-                <div class="ao-title">Fermeture automatique</div>
-                <div class="ao-sub">Ferme <strong>toutes</strong> les fenêtres dès qu'il y a du
-                    <strong>vent fort ou de la pluie</strong> (détectée au radar ou prévue).</div>
+                <div class="ao-title" data-i18n="ac_title">Fermeture automatique</div>
+                <div class="ao-sub" data-i18n="ac_sub">Ferme réellement toutes les fenêtres dès qu'il
+                    y a du vent fort ou de la pluie (détectée au radar ou prévue).</div>
             </div>
         </div>
 
@@ -70,43 +99,59 @@
                 <span class="ao-slider"></span>
             </label>
             <div class="ao-text">
-                <div class="ao-title">Ouverture automatique</div>
-                <div class="ao-sub">Ouvre pendant la <strong>nuit</strong> (jusqu'à
+                <div class="ao-title" data-i18n="ao_title">Ouverture automatique</div>
+                <div class="ao-sub" id="ao-sub" data-i18n="ao_sub">Ouvre pendant la nuit (jusqu'à
                     {{ morning_grace }} h après le lever du soleil) quand l'air est
-                    <strong>frais et calme</strong> (vent OK, pas de pluie) et que la
-                    température passe sous le seuil.</div>
+                    frais et calme (vent OK, pas de pluie) et que la
+                    température passe sous le seuil. N'ouvre réellement que si la
+                    fermeture automatique est aussi active (protection anti-orage).</div>
             </div>
         </div>
         <div class="ao-threshold {% if not automation.open_enabled %}off{% endif %}" id="ao-threshold">
-            <label for="ao-temp">Ouvrir en dessous de <strong id="ao-temp-val">{{ automation.open_temp_c }}</strong> °C</label>
+            <label for="ao-temp"><span data-i18n="ao_below">Ouvrir en dessous de</span> <strong id="ao-temp-val">{{ automation.open_temp_c }}</strong> °C</label>
             <input type="range" id="ao-temp" min="{{ auto_open_min }}" max="{{ auto_open_max }}"
                    step="1" value="{{ automation.open_temp_c }}">
             <div class="ao-scale"><span>{{ auto_open_min }} °C</span><span>{{ auto_open_max }} °C</span></div>
         </div>
 
-        <div class="ao-note">Phase d'essai : <strong>aucune fenêtre n'est réellement pilotée</strong>.
-            Chaque déclenchement est seulement consigné dans l'<a href="{{ url_for('history') }}">historique</a>,
-            le temps de valider la stratégie avant le raccordement du relais.</div>
+        <div class="ao-note">
+            <span data-i18n="ao_note_1">Pilotage réel :</span>
+            <strong data-i18n="ao_note_2">les fenêtres sont réellement pilotées</strong>
+            <span data-i18n="ao_note_3">quand l'automatisation est active. Désactivée, chaque déclenchement reste consigné dans l'</span><a href="{{ url_for('history') }}" data-i18n="ao_note_link">historique</a><span data-i18n="ao_note_4"> pour poursuivre le calibrage.</span>
+        </div>
     </div>
 {% endif %}
 
-<div class="section-eyebrow">État des fenêtres</div>
+<div class="section-eyebrow" data-i18n="sec_windows">État des fenêtres</div>
 
 {% for building, windows in buildings.items() %}
     {% set equipped = building in equipped_buildings %}
     {% set interactive = equipped and logged_in %}
     {% set bnum = building.split('_')[1] %}
+    {% set relay_down = equipped and relay_status.get(building, {}).get('reachable') == false %}
     <div class="building-card">
         <div class="d-flex align-items-center gap-2 mb-3">
             <div class="bnum">{{ bnum }}</div>
             <div class="flex-grow-1">
-                <h3>Bâtiment {{ bnum }}</h3>
-                <div class="bsub">{{ windows|length }} fenêtre{{ 's' if windows|length > 1 else '' }}</div>
+                <h3><span data-i18n="building">Bâtiment</span> {{ bnum }}</h3>
+                <div class="bsub"><span>{{ windows|length }}</span>
+                    <span data-i18n="{{ 'window_p' if windows|length > 1 else 'window_s' }}">{{ 'fenêtres' if windows|length > 1 else 'fenêtre' }}</span></div>
             </div>
             {% if not equipped %}
-                <span class="non-equipe-pill">Non équipé</span>
+                <span class="non-equipe-pill" data-i18n="not_equipped">Non équipé</span>
+            {% else %}
+                <span class="relay-down-pill {% if not relay_down %}d-none{% endif %}"
+                      id="relay-pill-{{ building }}" data-i18n="relay_down_pill">Relais injoignable</span>
             {% endif %}
         </div>
+
+        {% if equipped %}
+        <div class="relay-warning {% if not relay_down %}d-none{% endif %}" id="relay-warn-{{ building }}">
+            <span aria-hidden="true">⚠️</span>
+            <span data-i18n="relay_warn">Relais injoignable — impossible de piloter les fenêtres de ce
+                  bâtiment. Vérifiez l'alimentation et le réseau du module.</span>
+        </div>
+        {% endif %}
 
         <div class="windows cols-{{ windows|length }} {% if not interactive %}disabled{% endif %}">
             {% for window_id in windows %}
@@ -117,11 +162,13 @@
                     {% if interactive %}onclick="toggleWindow('{{ building }}', '{{ window_id }}')"{% endif %}>
                     <div class="wtop">
                         <span class="wlabel">{{ window_id }}</span>
-                        <span class="wkind">Fenêtre</span>
+                        <span class="wkind" data-i18n="window_kind">Fenêtre</span>
                     </div>
                     <span class="wstate">
                         <span class="wshape"></span>
-                        <span class="wstate-label">{% if status == 'partial' %}Entrouverte{% elif status %}Ouverte{% else %}Fermée{% endif %}</span>
+                        <span class="wstate-label"
+                              data-state="{% if status == 'partial' %}partial{% elif status %}open{% else %}closed{% endif %}"
+                        >{% if status == 'partial' %}Entrouverte{% elif status %}Ouverte{% else %}Fermée{% endif %}</span>
                     </span>
                 </{% if interactive %}button{% else %}div{% endif %}>
             {% endfor %}
@@ -130,6 +177,105 @@
 {% endfor %}
 
 <script>
+// ---- Home page strings (FR default + EN). ----
+App.extend({
+    fr: {
+        home_banner: "Cette interface permet d'aérer la cage d'escalier durant la nuit. Avant d'ouvrir, assurez-vous que la météo est clémente. Une protection automatique existe (fermeture en cas de vent ou de pluie), mais elle ne sert que de filet de sécurité — ne vous y fiez pas : refermez les fenêtres en cas de mauvaise météo et le matin lorsque la température monte.",
+        wx_title: 'Météo · prévision Open-Meteo', wx_temp: 'Température', wx_rain: 'Pluie', wx_wind: 'Rafales',
+        wx_cape: 'Orage (CAPE)', wx_indoor: 'Intérieur', sensor_soon: 'capteur intérieur à venir',
+        wx_loading: 'Chargement de la météo…', radar_cap: 'Radar — rayon',
+        sec_bulk: 'Actions groupées', bulk_open: 'Tout ouvrir', bulk_close: 'Tout fermer',
+        sec_auto: 'Automatisation',
+        ac_title: 'Fermeture automatique',
+        ac_sub: "Ferme réellement toutes les fenêtres dès qu'il y a du vent fort ou de la pluie (détectée au radar ou prévue).",
+        ao_title: 'Ouverture automatique',
+        ao_sub: "Ouvre pendant la nuit (jusqu'à {grace} h après le lever du soleil) quand l'air est frais et calme (vent OK, pas de pluie) et que la température passe sous le seuil. N'ouvre réellement que si la fermeture automatique est aussi active (protection anti-orage).",
+        ao_below: 'Ouvrir en dessous de',
+        ao_note_1: 'Pilotage réel :', ao_note_2: 'les fenêtres sont réellement pilotées',
+        ao_note_3: "quand l'automatisation est active. Désactivée, chaque déclenchement reste consigné dans l'", ao_note_link: 'historique',
+        ao_note_4: ' pour poursuivre le calibrage.',
+        sec_windows: 'État des fenêtres', building: 'Bâtiment',
+        window_s: 'fenêtre', window_p: 'fenêtres', window_kind: 'Fenêtre', not_equipped: 'Non équipé',
+        relay_down_pill: 'Relais injoignable',
+        relay_warn: "Relais injoignable — impossible de piloter les fenêtres de ce bâtiment. Vérifiez l'alimentation et le réseau du module.",
+        st_open: 'Ouverte', st_closed: 'Fermée', st_partial: 'Entrouverte',
+        // JS-assembled advice
+        adv_close: 'Fermeture conseillée — {reasons}',
+        adv_rain: '{detail} — vent faible, pas de fermeture automatique. Fermez manuellement si besoin.',
+        adv_caution: 'Vigilance — {reasons}. Surveillez la météo, fermez si besoin.',
+        adv_ok: 'Conditions OK — pas de fermeture nécessaire.',
+        adv_loading: 'Météo en cours de chargement…',
+        rain_default: 'pluie détectée',
+        vent_unknown: '🌙 Aération nocturne : créneau indéterminable (donnée solaire manquante)',
+        vent_ok: '🌙 Aération nocturne : créneau en cours',
+        vent_off: '☀️ Aération nocturne : hors créneau',
+        vent_off_at: '☀️ Aération nocturne : hors créneau — reprend à la nuit (vers {time})',
+        maj: 'MAJ',
+        rd_unavail: '🛰️ Radar : indisponible', rd_here: '🛰️ Radar : pluie sur la résidence',
+        rd_at: '🛰️ Radar : pluie à {km} km {dir}', rd_approach: ' (se rapproche)',
+        rd_eta: ', sur la résidence dans ~{min} min', rd_dry: '🛰️ Radar : sec (aucun écho ≤ {km} km)',
+        rd_age: ' · il y a {min} min',
+        ok_close_on: 'Fermeture automatique activée', ok_close_off: 'Fermeture automatique désactivée',
+        ok_open_on: 'Ouverture automatique activée — la nuit, sous {temp} °C', ok_open_off: 'Ouverture automatique désactivée',
+        ok_temp: "Seuil d'ouverture : {temp} °C",
+        err_unknown: 'Erreur inconnue', err_net: 'Erreur réseau : {e}', err_save: "Échec de l'enregistrement"
+    },
+    en: {
+        home_banner: 'This interface airs the stairwell shaft overnight. Before opening, make sure the weather is fine. Automatic protection exists (it closes on wind or rain), but only as a safety net — do not rely on it: close the windows in bad weather and in the morning as the temperature climbs.',
+        wx_title: 'Weather · Open-Meteo forecast', wx_temp: 'Temperature', wx_rain: 'Rain', wx_wind: 'Gusts',
+        wx_cape: 'Storm (CAPE)', wx_indoor: 'Indoor', sensor_soon: 'indoor sensor coming soon',
+        wx_loading: 'Loading weather…', radar_cap: 'Radar — radius',
+        sec_bulk: 'Bulk actions', bulk_open: 'Open all', bulk_close: 'Close all',
+        sec_auto: 'Automation',
+        ac_title: 'Automatic close',
+        ac_sub: 'Actually closes all windows as soon as there is strong wind or rain (detected on radar or forecast).',
+        ao_title: 'Automatic open',
+        ao_sub: 'Opens overnight (until {grace} h after sunrise) when the air is cool and calm (wind OK, no rain) and the temperature drops below the threshold. Only actually opens if automatic close is also on (storm protection).',
+        ao_below: 'Open below',
+        ao_note_1: 'Live control:', ao_note_2: 'windows are actually driven',
+        ao_note_3: 'when automation is on. When off, every trigger is still recorded in the ', ao_note_link: 'history',
+        ao_note_4: ' so you can keep calibrating.',
+        sec_windows: 'Window states', building: 'Building',
+        window_s: 'window', window_p: 'windows', window_kind: 'Window', not_equipped: 'Not equipped',
+        relay_down_pill: 'Relay unreachable',
+        relay_warn: 'Relay unreachable — the windows of this building cannot be controlled. Check the module’s power and network.',
+        st_open: 'Open', st_closed: 'Closed', st_partial: 'Ajar',
+        adv_close: 'Close advised — {reasons}',
+        adv_rain: '{detail} — light wind, no automatic close. Close manually if needed.',
+        adv_caution: 'Caution — {reasons}. Watch the weather, close if needed.',
+        adv_ok: 'Conditions OK — no need to close.',
+        adv_loading: 'Loading weather…',
+        rain_default: 'rain detected',
+        vent_unknown: '🌙 Night airing: window undetermined (solar data missing)',
+        vent_ok: '🌙 Night airing: window open now',
+        vent_off: '☀️ Night airing: outside the window',
+        vent_off_at: '☀️ Night airing: outside the window — resumes at night (around {time})',
+        maj: 'Updated',
+        rd_unavail: '🛰️ Radar: unavailable', rd_here: '🛰️ Radar: rain over the residence',
+        rd_at: '🛰️ Radar: rain {km} km {dir}', rd_approach: ' (approaching)',
+        rd_eta: ', over the residence in ~{min} min', rd_dry: '🛰️ Radar: dry (no echo ≤ {km} km)',
+        rd_age: ' · {min} min ago',
+        ok_close_on: 'Automatic close enabled', ok_close_off: 'Automatic close disabled',
+        ok_open_on: 'Automatic open enabled — overnight, below {temp} °C', ok_open_off: 'Automatic open disabled',
+        ok_temp: 'Open threshold: {temp} °C',
+        err_unknown: 'Unknown error', err_net: 'Network error: {e}', err_save: 'Save failed'
+    }
+});
+App.apply();
+
+// Compass directions localised for the radar string.
+const DIR_MAP = {
+    fr: { N:'au nord', S:'au sud', E:"à l'est", O:"à l'ouest", NE:'au nord-est', NO:'au nord-ouest', SE:'au sud-est', SO:'au sud-ouest' },
+    en: { N:'to the north', S:'to the south', E:'to the east', O:'to the west', NE:'to the north-east', NO:'to the north-west', SE:'to the south-east', SO:'to the south-west' }
+};
+function dirText(d) {
+    if (!d) return '';
+    const map = DIR_MAP[App.lang] || DIR_MAP.fr;
+    return map[d] || d;
+}
+
+let lastWeather = null, lastRadar = null;
+
 function updateStatuses() {
     fetch('/window_status')
         .then(r => r.json())
@@ -141,8 +287,11 @@ function updateStatuses() {
                     el.classList.remove('open', 'closed');
                     el.classList.add(status ? 'open' : 'closed');
                     const label = el.querySelector('.wstate-label');
-                    if (label) label.textContent =
-                        status === 'partial' ? 'Entrouverte' : (status ? 'Ouverte' : 'Fermée');
+                    if (label) {
+                        const st = status === 'partial' ? 'partial' : (status ? 'open' : 'closed');
+                        label.setAttribute('data-state', st);
+                        label.textContent = App.t('st_' + st);
+                    }
                 }
             }
         })
@@ -159,17 +308,84 @@ function toggleWindow(building, windowId) {
     .then(({ ok, data }) => {
         if (ok && data.success) {
             updateStatuses();
-            // The message carries the depth actually driven ("ouverture
-            // partielle (vent 25 km/h)") — the tile alone can't show why.
+            // The message carries the depth actually driven ("ouverture partielle
+            // (vent 25 km/h)") — it is server-generated French. TODO(i18n backend):
+            // localise these messages once the backend exposes a message key.
             if (data.message) showToast(data.message);
         } else {
-            showToast(data.error || 'Erreur inconnue', true);
+            showToast(data.error || App.t('err_unknown'), true);
         }
     })
-    .catch(err => showToast('Erreur réseau : ' + err, true));
+    .catch(err => showToast(App.t('err_net', { e: err }), true));
+}
+
+// ---- Live relay reachability: show / hide each building's "relais injoignable"
+//      warning as the background monitor probes the boards. ----
+function updateRelayStatus() {
+    fetch('/relay_status.json')
+        .then(r => r.json())
+        .then(data => {
+            for (const [building, s] of Object.entries(data)) {
+                const down = s && s.reachable === false;
+                const warn = document.getElementById('relay-warn-' + building);
+                const pill = document.getElementById('relay-pill-' + building);
+                if (warn) warn.classList.toggle('d-none', !down);
+                if (pill) pill.classList.toggle('d-none', !down);
+            }
+        })
+        .catch(() => {});
+}
+
+// ---- Indoor sparkline: accumulate polled temp_in_c in a small ring buffer so
+//      a trend shows even though the endpoint currently returns one point. ----
+const SPARK_KEY = 'ef-indoor-spark';
+function pushIndoor(v) {
+    if (v == null || isNaN(v)) return [];
+    let hist = [];
+    try { hist = JSON.parse(localStorage.getItem(SPARK_KEY) || '[]'); } catch (e) {}
+    const now = Date.now();
+    if (!hist.length || now - hist[hist.length - 1].t > 60000) hist.push({ t: now, v: v });
+    else hist[hist.length - 1] = { t: now, v: v };
+    if (hist.length > 40) hist = hist.slice(-40);
+    localStorage.setItem(SPARK_KEY, JSON.stringify(hist));
+    return hist;
+}
+function drawSpark(hist) {
+    const cv = document.getElementById('indoor-spark');
+    if (!cv) return;
+    const ctx = cv.getContext('2d');
+    const w = cv.width, h = cv.height;
+    ctx.clearRect(0, 0, w, h);
+    if (!hist || hist.length < 2) return;
+    const ys = hist.map(p => p.v);
+    let lo = Math.min(...ys), hi = Math.max(...ys);
+    if (hi - lo < 1) { hi += 0.5; lo -= 0.5; }
+    const pad = 4;
+    const X = i => pad + (i / (hist.length - 1)) * (w - 2 * pad);
+    const Y = v => h - pad - ((v - lo) / (hi - lo)) * (h - 2 * pad);
+    ctx.strokeStyle = App.token('--accent') || '#2b50d6';
+    ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.beginPath();
+    hist.forEach((p, i) => { const x = X(i), y = Y(p.v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.stroke();
+    ctx.fillStyle = App.token('--accent') || '#2b50d6';
+    const last = hist.length - 1;
+    ctx.beginPath(); ctx.arc(X(last), Y(hist[last].v), 2.5, 0, 7); ctx.fill();
+}
+function renderIndoor(tempIn) {
+    const box = document.getElementById('wx-indoor-box');
+    const val = document.getElementById('wx-indoor');
+    if (tempIn == null || isNaN(tempIn)) {
+        box.classList.remove('has-data');
+        val.textContent = '—';
+        return;
+    }
+    box.classList.add('has-data');
+    val.textContent = Number(tempIn).toFixed(1) + ' °C';
+    drawSpark(pushIndoor(Number(tempIn)));
 }
 
 function renderWeather(data) {
+    lastWeather = data;
     const advice = document.getElementById('wx-advice');
     const fetched = document.getElementById('wx-fetched');
     const setMetric = (id, txt) => { document.getElementById(id).textContent = txt; };
@@ -177,9 +393,10 @@ function renderWeather(data) {
     if (!data || data.available === false || data.temp_c === undefined) {
         ['wx-temp', 'wx-rain', 'wx-wind', 'wx-cape'].forEach(id => setMetric(id, '—'));
         advice.className = 'wx-advice muted';
-        advice.textContent = 'Météo en cours de chargement…';
+        advice.textContent = App.t('adv_loading');
         fetched.textContent = '';
         document.getElementById('wx-vent').textContent = '';
+        renderIndoor(null);
         return;
     }
 
@@ -190,41 +407,41 @@ function renderWeather(data) {
     document.getElementById('wx-cape-box').classList.toggle('flag', !!data.cape_high);
     document.querySelectorAll('.wx-look').forEach(s => s.textContent = data.lookahead_hours);
 
+    // Future field: /weather.json.temp_in_c (indoor sensor, not wired yet).
+    renderIndoor(data.temp_in_c);
+
     if (data.advise_close) {
         advice.className = 'wx-advice warn';
-        advice.textContent = 'Fermeture conseillée — ' + (data.reasons || []).join(' ; ');
+        advice.textContent = App.t('adv_close', { reasons: (data.reasons || []).join(' ; ') });
     } else if (data.rain) {
-        const d = data.rain_detail || 'pluie détectée';
+        let d = data.rain_detail || App.t('rain_default');
+        d = d.charAt(0).toUpperCase() + d.slice(1);
         advice.className = 'wx-advice caution';
-        advice.textContent = d.charAt(0).toUpperCase() + d.slice(1)
-            + ' — vent faible, pas de fermeture automatique. Fermez manuellement si besoin.';
+        advice.textContent = App.t('adv_rain', { detail: d });
     } else if (data.caution) {
         advice.className = 'wx-advice caution';
-        advice.textContent = 'Vigilance — ' + (data.caution_reasons || []).join(', ')
-            + '. Surveillez la météo, fermez si besoin.';
+        advice.textContent = App.t('adv_caution', { reasons: (data.caution_reasons || []).join(', ') });
     } else {
         advice.className = 'wx-advice';
-        advice.textContent = 'Conditions OK — pas de fermeture nécessaire.';
+        advice.textContent = App.t('adv_ok');
     }
 
-    // Night-airing window (the auto-open time gate): say whether it is open
-    // right now, so "auto-open enabled but nothing happens" is explainable.
     const vent = document.getElementById('wx-vent');
     if (data.venting_ok === undefined) {
         vent.textContent = '';
     } else if (data.venting_unknown) {
-        vent.textContent = '🌙 Aération nocturne : créneau indéterminable (donnée solaire manquante)';
+        vent.textContent = App.t('vent_unknown');
     } else if (data.venting_ok) {
-        vent.textContent = '🌙 Aération nocturne : créneau en cours';
+        vent.textContent = App.t('vent_ok');
     } else {
-        vent.textContent = '☀️ Aération nocturne : hors créneau'
-            + (data.sunset ? ` — reprend à la nuit (vers ${data.sunset.slice(11, 16)})` : '');
+        vent.textContent = data.sunset
+            ? App.t('vent_off_at', { time: data.sunset.slice(11, 16) })
+            : App.t('vent_off');
     }
 
     if (data.fetched_at) {
-        const t = new Date(data.fetched_at).toLocaleTimeString('fr-FR',
-            { hour: '2-digit', minute: '2-digit' });
-        fetched.textContent = 'MAJ ' + t + (data.model ? ' · ' + data.model : '');
+        const t = App.fmtTime(data.fetched_at, { hour: '2-digit', minute: '2-digit' });
+        fetched.textContent = App.t('maj') + ' ' + t + (data.model ? ' · ' + data.model : '');
     }
 }
 
@@ -233,25 +450,26 @@ function updateWeather() {
 }
 
 function renderRadar(data) {
+    lastRadar = data;
     const el = document.getElementById('wx-radar');
     if (!data || data.available === false || data.rain_near === undefined) {
         el.className = 'wx-radar';
-        el.textContent = '🛰️ Radar : indisponible';
+        el.textContent = App.t('rd_unavail');
         return;
     }
     let txt;
     if (data.rain_near) {
         el.className = 'wx-radar rain';
         txt = (data.nearest_km != null && data.nearest_km < 1.5)
-            ? '🛰️ Radar : pluie sur la résidence'
-            : `🛰️ Radar : pluie à ${data.nearest_km} km ${data.direction}`;
-        if (data.approaching) txt += ' (se rapproche)';
-        if (data.eta_min != null) txt += `, sur la résidence dans ~${data.eta_min} min`;
+            ? App.t('rd_here')
+            : App.t('rd_at', { km: data.nearest_km, dir: dirText(data.direction) });
+        if (data.approaching) txt += App.t('rd_approach');
+        if (data.eta_min != null) txt += App.t('rd_eta', { min: data.eta_min });
     } else {
         el.className = 'wx-radar';
-        txt = `🛰️ Radar : sec (aucun écho ≤ ${data.radius_km} km)`;
+        txt = App.t('rd_dry', { km: data.radius_km });
     }
-    if (data.frame_age_min != null) txt += ` · il y a ${data.frame_age_min} min`;
+    if (data.frame_age_min != null) txt += App.t('rd_age', { min: data.frame_age_min });
     el.textContent = txt;
 }
 
@@ -272,16 +490,33 @@ radarWrap.addEventListener('mouseleave', hideRadarPop);
 radarWrap.addEventListener('click', () =>
     radarWrap.classList.contains('show') ? hideRadarPop() : showRadarPop());
 
+// Re-render the dynamic panels when language or theme changes.
+App.onChange(function () {
+    renderWeather(lastWeather);
+    renderRadar(lastRadar);
+    updateStatuses();
+});
+
 renderWeather({{ weather|tojson }});
 renderRadar({{ radar|tojson }});
 setInterval(updateStatuses, 5000);
 setInterval(updateWeather, 60000);
 setInterval(updateRadar, 120000);
+setInterval(updateRelayStatus, 30000);
 </script>
 
 {% if logged_in %}
 <script>
-// Automation simulation settings: persist each toggle / threshold to the server.
+// The auto-open blurb interpolates {grace}; inject the server value once.
+(function () {
+    const g = '{{ morning_grace }}';
+    App.dict.fr.ao_sub = App.dict.fr.ao_sub.replace('{grace}', g);
+    App.dict.en.ao_sub = App.dict.en.ao_sub.replace('{grace}', g);
+    const sub = document.getElementById('ao-sub');
+    if (sub) sub.textContent = App.t('ao_sub');
+})();
+
+// Automation settings: persist each toggle / threshold to the server.
 const autoCard = document.getElementById('automation-card');
 const acEnabled = document.getElementById('ac-enabled');
 const aoEnabled = document.getElementById('ao-enabled');
@@ -303,27 +538,25 @@ function saveAutomation(payload, okMsg) {
     .then(r => r.json())
     .then(data => {
         if (data.success) showToast(okMsg);
-        else showToast(data.error || "Échec de l'enregistrement", true);
+        else showToast(data.error || App.t('err_save'), true);
     })
-    .catch(err => showToast('Erreur réseau : ' + err, true));
+    .catch(err => showToast(App.t('err_net', { e: err }), true));
 }
 
 acEnabled.addEventListener('change', () => {
     reflectAutomation();
     saveAutomation({ close_enabled: acEnabled.checked },
-        acEnabled.checked ? 'Fermeture auto simulée activée'
-                          : 'Fermeture auto simulée désactivée');
+        App.t(acEnabled.checked ? 'ok_close_on' : 'ok_close_off'));
 });
 aoEnabled.addEventListener('change', () => {
     reflectAutomation();
     saveAutomation({ open_enabled: aoEnabled.checked },
-        aoEnabled.checked ? `Ouverture auto simulée activée — la nuit, sous ${aoTemp.value} °C`
-                          : 'Ouverture auto simulée désactivée');
+        App.t(aoEnabled.checked ? 'ok_open_on' : 'ok_open_off', { temp: aoTemp.value }));
 });
 aoTemp.addEventListener('input', () => { aoTempVal.textContent = aoTemp.value; });
 aoTemp.addEventListener('change', () =>
     saveAutomation({ open_temp_c: parseInt(aoTemp.value, 10) },
-        `Seuil d'ouverture : ${aoTemp.value} °C`));
+        App.t('ok_temp', { temp: aoTemp.value })));
 
 reflectAutomation();
 </script>

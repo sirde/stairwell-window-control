@@ -197,6 +197,24 @@ def _tcp_session(ip: str):
         client.close()
 
 
+def probe(ip: str) -> bool:
+    """Reachability check: can we open a Modbus/TCP session to the board now?
+
+    Serialised on the per-board lock so a probe never collides with an in-flight
+    window command (these boards accept a single client at a time). Returns True
+    on a successful connect, False on any connection error/timeout — never
+    raises, so a monitor loop can call it freely.
+    """
+    try:
+        with _module_lock(ip), _tcp_session(ip):
+            return True
+    except (OSError, socket.timeout):
+        return False
+    except Exception:
+        log.exception("Relay probe error for %s", ip)
+        return False
+
+
 def send_window_command(building: str, window_id: str, action: str,
                         duration_seconds: float) -> tuple[bool, str]:
     log.info("%s window %s: %s (%.0fs)", building, window_id, action, duration_seconds)

@@ -3,20 +3,20 @@
 
 {% block content %}
 
-<div class="section-eyebrow">Historique des événements</div>
+<div class="section-eyebrow" data-i18n="hist_eyebrow">Historique des événements</div>
 
 <div class="building-card">
     {% if events %}
-    <div style="overflow-x:auto;">
+    <div class="scroll-x">
         <table class="history-table">
             <thead>
                 <tr>
-                    <th>Date</th>
-                    <th>Fenêtre</th>
-                    <th>Action</th>
-                    <th>Origine</th>
-                    <th>Par</th>
-                    <th>Raison</th>
+                    <th data-i18n="hist_date">Date</th>
+                    <th data-i18n="hist_window">Fenêtre</th>
+                    <th data-i18n="hist_action">Action</th>
+                    <th data-i18n="hist_source">Origine</th>
+                    <th data-i18n="hist_actor">Par</th>
+                    <th data-i18n="hist_reason">Raison</th>
                 </tr>
             </thead>
             <tbody>
@@ -25,20 +25,23 @@
                     <td class="ts">{{ e.ts|localdt }}</td>
                     <td>
                         {% if e.action in ['caution', 'clear'] %}
-                            <span class="ev-cond">Météo</span>
+                            <span class="ev-cond" data-i18n="hist_meteo">Météo</span>
                         {% elif e.building and e.window %}
-                            Bât {{ e.building.split('_')[1] }} · {{ e.window }}
+                            <span data-i18n="hist_bat">Bât</span> {{ e.building.split('_')[1] }} · {{ e.window }}
                         {% else %}
-                            <span class="ev-cond">Toutes</span>
+                            <span class="ev-cond" data-i18n="hist_all">Toutes</span>
                         {% endif %}
                     </td>
                     <td>
                         {% set pill = 'advisory' if e.source == 'advisory'
                                       else ('auto' if e.source == 'auto' else e.action) %}
+                        {# action_fr / source_fr / actor_fr are server-rendered French.
+                           TODO(i18n backend): expose language-neutral keys so these
+                           can be localised — out of scope for this no-backend pass. #}
                         <span class="ev-pill {{ pill }}">
-                            {{ e.action_fr }}{% if e.source == 'auto' %} · sim{% endif %}
+                            {{ e.action_fr }}{% if e.source == 'auto' and e.success is none %} · <span data-i18n="hist_sim">sim</span>{% endif %}
                         </span>
-                        {% if e.success == 0 %}<span class="ev-cond"> ✗ échec</span>{% endif %}
+                        {% if e.success == 0 %}<span class="ev-cond"> ✗ <span data-i18n="hist_fail">échec</span></span>{% endif %}
                     </td>
                     <td>{{ e.source_fr }}</td>
                     <td>{{ e.actor_fr }}</td>
@@ -47,8 +50,8 @@
                         {% if e.conditions and e.conditions.temp_c is not none %}
                             <div class="ev-cond">
                                 {{ e.conditions.temp_c }} °C ·
-                                pluie {{ e.conditions.rain_prob }} % ·
-                                rafales {{ e.conditions.wind_gust_kmh|round|int }} km/h
+                                <span data-i18n="hist_rain">pluie</span> {{ e.conditions.rain_prob }} % ·
+                                <span data-i18n="hist_gust">rafales</span> {{ e.conditions.wind_gust_kmh|round|int }} km/h
                             </div>
                         {% endif %}
                     </td>
@@ -58,13 +61,40 @@
         </table>
     </div>
     {% else %}
-        <div class="empty-note">Aucun événement enregistré pour l'instant.</div>
+        <div class="empty-note" data-i18n="hist_empty">Aucun événement enregistré pour l'instant.</div>
     {% endif %}
 </div>
 
 <div class="section-eyebrow" style="margin-top:16px;">
-    {{ events|length }} événement{{ 's' if events|length > 1 else '' }} ·
-    les 300 plus récents
+    <span id="hist-count">{{ events|length }}</span>
+    <span data-i18n="{{ 'hist_events_p' if events|length > 1 else 'hist_events_s' }}">{{ 'événements' if events|length > 1 else 'événement' }}</span>
+    · <span data-i18n="hist_recent">les 300 plus récents</span>
 </div>
+
+<script>
+App.extend({
+    fr: {
+        hist_eyebrow: 'Historique des événements',
+        hist_date: 'Date', hist_window: 'Fenêtre', hist_action: 'Action',
+        hist_source: 'Origine', hist_actor: 'Par', hist_reason: 'Raison',
+        hist_meteo: 'Météo', hist_bat: 'Bât', hist_all: 'Toutes',
+        hist_sim: 'sim', hist_fail: 'échec',
+        hist_rain: 'pluie', hist_gust: 'rafales',
+        hist_empty: "Aucun événement enregistré pour l'instant.",
+        hist_events_s: 'événement', hist_events_p: 'événements', hist_recent: 'les 300 plus récents'
+    },
+    en: {
+        hist_eyebrow: 'Event history',
+        hist_date: 'Date', hist_window: 'Window', hist_action: 'Action',
+        hist_source: 'Source', hist_actor: 'By', hist_reason: 'Reason',
+        hist_meteo: 'Weather', hist_bat: 'Bldg', hist_all: 'All',
+        hist_sim: 'sim', hist_fail: 'failed',
+        hist_rain: 'rain', hist_gust: 'gusts',
+        hist_empty: 'No events recorded yet.',
+        hist_events_s: 'event', hist_events_p: 'events', hist_recent: 'most recent 300'
+    }
+});
+App.apply();
+</script>
 
 {% endblock %}

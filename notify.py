@@ -41,18 +41,27 @@ _notifier = _build_notifier()
 # names as emoji). A caller may still override the priority per call (e.g. the
 # stale alert escalates to "high" when the last weather was touchy). Tags are
 # ASCII GitHub-style shortcodes so they stay header-safe.
+#
+# `push: False` mutes an event to log-only — the app still evaluates it (and
+# records it in /history where applicable), it just no longer sends a push. This
+# keeps the alert stream to the handful residents actually asked for:
+#   • a window opening / closing,
+#   • a relay or the forecast becoming unreachable,
+#   • conditions reaching the close limit *while a window is open*.
+# The softer weather chatter (caution, favourable-to-open, all-clear, weather
+# recovered, app restart) stays informational-only.
 EVENTS = {
-    "app_started":       {"priority": "default", "tags": ["arrows_counterclockwise"]},
+    "app_started":       {"priority": "default", "tags": ["arrows_counterclockwise"], "push": False},
     "relay_unreachable": {"priority": "high",    "tags": ["warning"]},
     "close_advised":     {"priority": "high",    "tags": ["wind_face", "umbrella"]},
     "auto_closed":       {"priority": "high",    "tags": ["lock", "umbrella"]},
-    "auto_opened":       {"priority": "default", "tags": ["window"]},
-    "window_opened":     {"priority": "low",     "tags": ["window"]},
-    "window_closed":     {"priority": "low",     "tags": ["window"]},
-    "weather_caution":   {"priority": "default", "tags": ["eyes"]},
-    "weather_clear":     {"priority": "low",     "tags": ["white_check_mark"]},
+    "auto_opened":       {"priority": "default", "tags": ["window"], "push": False},
+    "window_opened":     {"priority": "default", "tags": ["window"]},
+    "window_closed":     {"priority": "default", "tags": ["window"]},
+    "weather_caution":   {"priority": "default", "tags": ["eyes"], "push": False},
+    "weather_clear":     {"priority": "low",     "tags": ["white_check_mark"], "push": False},
     "weather_stale":     {"priority": "default", "tags": ["fog"]},
-    "weather_recovered": {"priority": "default", "tags": ["white_check_mark"]},
+    "weather_recovered": {"priority": "default", "tags": ["white_check_mark"], "push": False},
 }
 
 
@@ -85,6 +94,10 @@ def send(event: str, title: str, message: str, *,
     Never raises — delivery failures are swallowed and logged by the notifier.
     """
     defaults = EVENTS.get(event, {})
+    if not defaults.get("push", True):
+        # Muted event: evaluated and logged elsewhere, but no push goes out.
+        log.debug("notification %r suppressed (push disabled)", event)
+        return
     n = Notification(
         event=event,
         title=title,

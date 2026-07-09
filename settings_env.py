@@ -47,7 +47,8 @@ FIELDS = [
     dict(key="WIND_GUST_THRESHOLD_KMH", group="Seuils météo",
          label="Rafales — fermeture", unit="km/h", type=float, default=40.0,
          min=10, max=150, step=1,
-         help="Au-delà, le système conseille (ou simule) la fermeture."),
+         help="Au-delà, le système ferme les fenêtres (ou le conseille si "
+              "la fermeture automatique est désactivée)."),
     dict(key="WIND_FULL_OPEN_MAX_KMH", group="Seuils météo",
          label="Rafales — ouverture complète", unit="km/h", type=float, default=20.0,
          min=0, max=150, step=1,

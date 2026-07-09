@@ -154,10 +154,19 @@ NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "") or None
 # notification (and shown on the subscribe page). Optional.
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
-# Manual open/close from the dashboard also pushes a (low-priority) notification.
-# Off by default so an admin tapping windows doesn't ping everyone; the valuable
-# pushes are the weather-driven and failure ones.
-NOTIFY_MANUAL_ACTIONS = os.environ.get("NOTIFY_MANUAL_ACTIONS", "0") == "1"
+# Open/close from the dashboard pushes a notification ("fenêtre ouverte/fermée").
+# On by default: residents asked to be told whenever the windows open or close.
+# Set to 0 to silence manual open/close pushes (keeping only the weather/failure
+# alerts).
+NOTIFY_MANUAL_ACTIONS = os.environ.get("NOTIFY_MANUAL_ACTIONS", "1") == "1"
+
+# --- Relay reachability monitor ----------------------------------------------
+# How often a background thread probes each equipped building's relay board with
+# a lightweight TCP connect. A healthy->unreachable transition (including one
+# that is already down at startup) raises a single "module injoignable" push;
+# recovery is logged, not pushed. Low enough to notice a disconnect promptly,
+# high enough to stay gentle on single-client boards.
+RELAY_PING_SECONDS = int(os.environ.get("RELAY_PING_SECONDS", "60"))
 
 # --- App-down watchdog (healthchecks.io heartbeat) ---------------------------
 # The app pings this URL on a timer; a missed ping makes the external monitor

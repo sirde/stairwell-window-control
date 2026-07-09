@@ -3,7 +3,6 @@ import io
 import json
 import logging
 import os
-import tempfile
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from zoneinfo import ZoneInfo
@@ -16,10 +15,12 @@ import config
 import db
 import notify
 import radar
+import relay_monitor
 import settings_env
 import weather
 from modbus_tcp import send_window_command
 from notifier import heartbeat
+from window_state import default_status, load_status, save_status
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -33,8 +34,6 @@ app.permanent_session_lifetime = timedelta(days=30)
 
 USERNAME = os.environ["ADMIN_USERNAME"]
 PASSWORD_HASH = os.environ["ADMIN_PASSWORD_HASH"]
-
-STATUS_FILE = os.environ.get("STATUS_FILE", "status.json")
 
 DISPLAY_TZ = ZoneInfo(config.DISPLAY_TZ)
 
@@ -73,10 +72,6 @@ def actor_label(actor: str | None) -> str:
     return actor
 
 
-def default_status() -> dict:
-    return {b: {w: False for w in windows} for b, windows in config.BUILDINGS.items()}
-
-
 def reset_status_on_startup() -> None:
     """Physical window state is unknown after a restart — assume all closed."""
     save_status(default_status())
@@ -87,41 +82,6 @@ def reset_status_on_startup() -> None:
     log.info("Status reset to all-closed on startup")
     notify.send("app_started", "Application redémarrée",
                 "L'application a redémarré — fenêtres réinitialisées à « fermées ».")
-
-
-def load_status() -> dict:
-    try:
-        with open(STATUS_FILE) as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default_status()
-
-    # Reconcile with current config: add missing buildings/windows, drop stale.
-    # Values are depth-aware: False = closed, "full" / "partial" = open depth.
-    # Legacy plain-boolean files (pre-depth) map True to a full open.
-    reconciled = default_status()
-    for building, windows in reconciled.items():
-        for window in windows:
-            if building in data and window in data[building]:
-                v = data[building][window]
-                reconciled[building][window] = (
-                    v if v in ("full", "partial") else ("full" if v else False))
-    return reconciled
-
-
-def save_status(data: dict) -> None:
-    directory = os.path.dirname(os.path.abspath(STATUS_FILE)) or "."
-    fd, tmp_path = tempfile.mkstemp(prefix=".status-", suffix=".tmp", dir=directory)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp_path, STATUS_FILE)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
 
 
 @app.context_processor
@@ -166,6 +126,7 @@ def home():
         window_opened=load_status(),
         buildings=config.BUILDINGS,
         equipped_buildings=config.EQUIPPED_BUILDINGS,
+        relay_status=relay_monitor.status(),
         weather=weather.current(),
         radar=radar.latest(),
         radar_radius_km=int(config.RADAR_RAIN_RADIUS_KM),
@@ -180,6 +141,13 @@ def home():
 def window_status():
     # Intentionally public: read-only, used by the dashboard auto-refresh.
     return jsonify(load_status())
+
+
+@app.route("/relay_status.json")
+def relay_status_json():
+    # Public read-only: per-building relay reachability for the live warning on
+    # the home page building cards.
+    return jsonify(relay_monitor.status())
 
 
 @app.route("/weather.json")
@@ -299,8 +267,10 @@ def settings_automation():
 
     saved = db.set_automation(**kwargs)
     log.info("Automation settings updated by %s: %s", session.get("user"), saved)
-    # Re-evaluate immediately so toggling on during a storm (or on a cool, calm
-    # evening) logs the simulated action at once instead of next poll.
+    # Re-evaluate immediately so flipping a toggle acts at once instead of at the
+    # next poll: enabling auto-close during a storm drives the windows shut now;
+    # a still-simulated trigger is logged now. Runs in the request thread — the
+    # drive is a couple of short Modbus writes, timers do the rest.
     try:
         weather.evaluate(load_status)
     except Exception:
@@ -374,8 +344,8 @@ def settings_config():
         db.set_automation(open_temp_c=int(open_temp))
     log.info("Config updated by %s: %s", session.get("user"),
              overrides or "(tout par défaut)")
-    # Re-evaluate at once so a threshold change shows its effect (advisory /
-    # simulated open) without waiting for the next poll.
+    # Re-evaluate at once so a threshold change shows its effect (drive, advisory
+    # or simulated) without waiting for the next poll.
     try:
         weather.evaluate(load_status)
     except Exception:
@@ -393,24 +363,6 @@ def history():
         e["source_fr"] = SOURCE_FR.get(e["source"], e["source"])
         e["actor_fr"] = actor_label(e["actor"])
     return render_template("history.html", events=events)
-
-
-def _drive_command(action: str, wsum: dict | None) -> tuple[float, str, bool | str]:
-    """(drive_seconds, reason_suffix, stored_state) for a window command.
-
-    Close always overdrives to seat fully shut; open is full or partial depending
-    on wind/rain (weather.open_plan, fed the same summary that gets recorded with
-    the event so the decision and the history conditions can't diverge). The
-    suffix makes the depth visible in the history reason; the stored state
-    (False / "full" / "partial") keeps it visible in the live UI.
-    """
-    if action == "close":
-        return config.WINDOW_CLOSE_SECONDS, "", False
-    plan = weather.open_plan(wsum)
-    if plan["full"]:
-        return config.WINDOW_FULL_TRAVEL_SECONDS, " — ouverture complète", "full"
-    return (config.WINDOW_PARTIAL_OPEN_SECONDS,
-            f" — ouverture partielle ({plan['reason']})", "partial")
 
 
 @app.route("/toggle_window", methods=["POST"])
@@ -431,7 +383,7 @@ def toggle_window():
     actor = session.get("user")
     conditions = weather.latest()
 
-    duration, depth_suffix, new_status = _drive_command(action, conditions)
+    duration, depth_suffix, new_status = weather.drive_command(action, conditions)
     success, message = send_window_command(building, window, action, duration)
     if not success:
         # Don't persist a state we failed to apply, but do record the attempt.
@@ -472,7 +424,7 @@ def control_all_buildings(action):
     bulk_reason = f"Action groupée — tout {'ouvrir' if action == 'open' else 'fermer'}"
     # Same conditions for the whole bulk, so decide depth once — every window is
     # driven identically (open partial/full together, close overdriven together).
-    duration, depth_suffix, new_status = _drive_command(action, conditions)
+    duration, depth_suffix, new_status = weather.drive_command(action, conditions)
 
     for building_id, window_list in config.BUILDINGS.items():
         if building_id not in config.EQUIPPED_BUILDINGS:
@@ -515,6 +467,9 @@ def control_all_buildings(action):
 
 db.init()
 reset_status_on_startup()
+# Frequent relay reachability probe: warns once when a board drops (or is already
+# down at boot) and drives the live "relais injoignable" badge on the home page.
+relay_monitor.start()
 if os.environ.get("ENABLE_WEATHER_POLLER", "1") == "1":
     weather.start_poller(load_status)
 if config.RADAR_ENABLED and radar.available():

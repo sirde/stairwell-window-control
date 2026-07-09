@@ -170,9 +170,9 @@ def recent_radar(limit: int = 300) -> list[dict]:
 
 
 # --- Settings (key/value) ----------------------------------------------------
-# Automation is dry-run in Phase 1 (no relay): when enabled, a poll whose
-# conditions are met logs a *simulated* open/close into the history so the
-# strategy can be judged before any relay actually drives a window.
+# Automation toggles gate live actuation (see weather.py): enabled = the poller
+# drives the relay for real on a matching trigger; disabled = the trigger is
+# still logged (advisory / simulated) so the strategy can keep being calibrated.
 AUTO_OPEN_TEMP_MIN = 15
 AUTO_OPEN_TEMP_MAX = 30
 AUTO_OPEN_TEMP_DEFAULT = 22

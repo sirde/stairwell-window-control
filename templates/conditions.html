@@ -5,107 +5,346 @@
 {% endblock %}
 
 {% block content %}
-<div class="section-eyebrow">Journal des conditions — relevés météo &amp; radar</div>
+<div class="section-eyebrow" data-i18n="cond_eyebrow">Journal des conditions — relevés météo &amp; radar</div>
 
 {% if not wseries and not rseries %}
     <div class="building-card">
-        <div class="empty-note">Aucun relevé enregistré pour l'instant. Les relevés
+        <div class="empty-note" data-i18n="cond_empty">Aucun relevé enregistré pour l'instant. Les relevés
         s'accumulent à chaque interrogation météo / radar.</div>
     </div>
 {% else %}
-    <div class="section-eyebrow" id="cond-meta"></div>
+    <!-- Range switcher: re-scales every chart together, client-side over the
+         provided wseries/rseries. NOTE: the backend caps history at 500
+         snapshots, so 7 j / 30 j / Tout only reach as far back as those 500
+         points allow. A true multi-week trend needs a follow-up range-
+         parametrised endpoint (e.g. /conditions.json?range=30d&bucket=1h);
+         this switcher is built so that endpoint can slot in later — swap the
+         in-memory slice for a fetch keyed on the active range — with no
+         redesign. -->
+    <div class="range-bar">
+        <div class="range-switch" id="range-switch" role="group" aria-label="Plage de temps">
+            <button type="button" data-range="24h" class="active">24 h</button>
+            <button type="button" data-range="7j">7 j</button>
+            <button type="button" data-range="30j">30 j</button>
+            <button type="button" data-range="tout" data-i18n="range_all">Tout</button>
+        </div>
+        <div class="section-eyebrow" id="cond-meta" style="margin:0;"></div>
+    </div>
 
-    <div class="building-card"><div class="chart-title">Température (°C)</div>
+    <!-- HERO: indoor vs outdoor temperature. This pairing drives the night-
+         cooling logic (open when outdoor drops below indoor). -->
+    <div class="building-card">
+        <div class="chart-title" data-i18n="ch_hero">Température intérieure vs extérieure (°C)</div>
+        <div class="chart-sub" data-i18n="ch_hero_sub">L'aération nocturne devient utile quand l'extérieur passe sous l'intérieur.</div>
+        <div class="chart-wrap hero"><canvas id="c-hero"></canvas></div>
+        <div class="chart-note" id="hero-note"></div>
+    </div>
+
+    <div class="building-card"><div class="chart-title" data-i18n="ch_temp">Température extérieure (°C)</div>
         <div class="chart-wrap"><canvas id="c-temp"></canvas></div></div>
-    <div class="building-card"><div class="chart-title">Rafales (km/h) — ligne = seuil de fermeture</div>
+    <div class="building-card"><div class="chart-title" data-i18n="ch_wind">Rafales (km/h) — ligne = seuil de fermeture</div>
         <div class="chart-wrap"><canvas id="c-wind"></canvas></div></div>
-    <div class="building-card"><div class="chart-title">Pluie — prévision (%) &amp; détections radar (●)</div>
+    <div class="building-card"><div class="chart-title" data-i18n="ch_rain">Pluie — prévision (%) &amp; détections radar (●)</div>
         <div class="chart-wrap"><canvas id="c-rain"></canvas></div></div>
-    <div class="building-card"><div class="chart-title">Instabilité — CAPE (J/kg)</div>
+    <div class="building-card"><div class="chart-title" data-i18n="ch_cape">Instabilité — CAPE (J/kg)</div>
         <div class="chart-wrap"><canvas id="c-cape"></canvas></div></div>
-    <div class="building-card"><div class="chart-title">Avis du système au fil du temps</div>
+    <div class="building-card"><div class="chart-title" data-i18n="ch_advice">Avis du système au fil du temps</div>
         <div class="chart-wrap short"><canvas id="c-advice"></canvas></div></div>
 
 <script>
-const W = {{ wseries|tojson }};
-const R = {{ rseries|tojson }};
+// ===================== Data (oldest-first, server-provided) =====================
+const W_ALL = {{ wseries|tojson }};
+const R_ALL = {{ rseries|tojson }};
 const WIND_THR = {{ wind_threshold }}, RAIN_THR = {{ rain_threshold }}, CAPE_THR = {{ cape_threshold }};
 
-const ms  = s => new Date(s).getTime();
-const fmt = v => new Date(v).toLocaleString('fr-FR',
-    { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-const xy  = (arr, key) => arr.filter(d => d[key] !== null && d[key] !== undefined)
-                             .map(d => ({ x: ms(d.ts), y: d[key] }));
+// ===================== i18n =====================
+App.extend({
+    fr: {
+        cond_eyebrow: 'Journal des conditions — relevés météo & radar',
+        cond_empty: "Aucun relevé enregistré pour l'instant. Les relevés s'accumulent à chaque interrogation météo / radar.",
+        range_all: 'Tout',
+        ch_hero: 'Température intérieure vs extérieure (°C)',
+        ch_hero_sub: "L'aération nocturne devient utile quand l'extérieur passe sous l'intérieur.",
+        ch_temp: 'Température extérieure (°C)', ch_wind: 'Rafales (km/h) — ligne = seuil de fermeture',
+        ch_rain: 'Pluie — prévision (%) & détections radar (●)', ch_cape: 'Instabilité — CAPE (J/kg)',
+        ch_advice: 'Avis du système au fil du temps',
+        lg_indoor: 'Intérieur', lg_outdoor: 'Extérieur', lg_close: 'Fermeture', lg_caution: 'Vigilance',
+        ax_temp: '°C', ax_wind: 'km/h', ax_cape: 'J/kg', ax_pct: '%',
+        indoor_soon: 'Capteur intérieur à venir — seule la courbe extérieure est tracée.',
+        meta: '{w} relevés météo · {r} relevés radar',
+        meta_span: '{w} relevés météo · {r} relevés radar · du {from} au {to}',
+        no_points: 'Pas de relevé sur cette plage.',
+        downsampled: 'Données lissées ({n} points) pour la lisibilité.'
+    },
+    en: {
+        cond_eyebrow: 'Conditions journal — weather & radar readings',
+        cond_empty: 'No readings recorded yet. Readings accumulate on each weather / radar poll.',
+        range_all: 'All',
+        ch_hero: 'Indoor vs outdoor temperature (°C)',
+        ch_hero_sub: 'Night airing pays off when the outside drops below the inside.',
+        ch_temp: 'Outdoor temperature (°C)', ch_wind: 'Gusts (km/h) — line = close threshold',
+        ch_rain: 'Rain — forecast (%) & radar detections (●)', ch_cape: 'Instability — CAPE (J/kg)',
+        ch_advice: 'System advice over time',
+        lg_indoor: 'Indoor', lg_outdoor: 'Outdoor', lg_close: 'Close', lg_caution: 'Caution',
+        ax_temp: '°C', ax_wind: 'km/h', ax_cape: 'J/kg', ax_pct: '%',
+        indoor_soon: 'Indoor sensor coming soon — only the outdoor curve is drawn.',
+        meta: '{w} weather readings · {r} radar readings',
+        meta_span: '{w} weather readings · {r} radar readings · from {from} to {to}',
+        no_points: 'No readings in this range.',
+        downsampled: 'Data smoothed ({n} points) for legibility.'
+    }
+});
+App.apply();
 
-function thresholdDS(points, thr) {
-    if (!points.length) return null;
-    const xs = points.map(p => p.x);
-    return { data: [{ x: Math.min(...xs), y: thr }, { x: Math.max(...xs), y: thr }],
-             borderColor: '#b42318', borderDash: [5, 4], borderWidth: 1,
-             pointRadius: 0, fill: false };
+// ===================== helpers =====================
+const ms  = s => new Date(s).getTime();
+const xyKey = (arr, key) => arr.filter(d => d[key] !== null && d[key] !== undefined)
+                              .map(d => ({ x: ms(d.ts), y: d[key] }));
+
+// Locale-aware axis / tooltip formatting; granularity depends on the span.
+function makeFmt(spanMs) {
+    const short = spanMs <= 2 * 864e5;                       // ≤ 2 days → time of day
+    const opts = short ? { hour: '2-digit', minute: '2-digit' }
+                       : { day: '2-digit', month: '2-digit' };
+    return v => App.fmtDate(v, opts);
+}
+function fullFmt(v) {
+    return App.fmtDate(v, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
-function opts(yTitle, yOpts) {
+// Simple time-bucket average downsample — keeps long ranges legible & light.
+function downsample(points, maxN) {
+    if (points.length <= maxN) return points;
+    const first = points[0].x, last = points[points.length - 1].x;
+    const bucket = (last - first) / maxN;
+    const out = [], acc = {};
+    points.forEach(p => {
+        const b = Math.floor((p.x - first) / bucket);
+        (acc[b] || (acc[b] = [])).push(p);
+    });
+    Object.keys(acc).sort((a, b) => a - b).forEach(b => {
+        const g = acc[b];
+        const x = g.reduce((s, p) => s + p.x, 0) / g.length;
+        const y = g.reduce((s, p) => s + p.y, 0) / g.length;
+        out.push({ x: x, y: y });
+    });
+    return out;
+}
+
+const RANGES = { '24h': 864e5, '7j': 7 * 864e5, '30j': 30 * 864e5, 'tout': Infinity };
+let currentRange = '24h';
+const charts = {};
+
+function sliceByRange(arr, rangeKey, anchor) {
+    const span = RANGES[rangeKey];
+    if (span === Infinity) return arr.slice();
+    const from = anchor - span;
+    return arr.filter(d => ms(d.ts) >= from);
+}
+
+function themeColors() {
     return {
-        responsive: true, maintainAspectRatio: false,
-        interaction: { mode: 'nearest', intersect: false },
-        scales: {
-            x: { type: 'linear', ticks: { maxTicksLimit: 7, callback: fmt, font: { size: 10 } } },
-            y: Object.assign({ title: { display: !!yTitle, text: yTitle } }, yOpts || {}),
-        },
-        plugins: {
-            legend: { display: false },
-            tooltip: { callbacks: { title: it => fmt(it[0].parsed.x) } },
-        },
+        grid: App.token('--grid') || 'rgba(26,31,43,0.08)',
+        tick: App.token('--muted') || '#5b6472',
+        temp: App.token('--accent') || '#2b50d6',
+        indoor: App.token('--moving') || '#a85a00',
+        wind: App.token('--moving') || '#a85a00',
+        cape: App.token('--warn-fg') || '#6b4a00',
+        rain: App.token('--open') || '#1a7f3c',
+        danger: App.token('--closed') || '#b42318'
     };
 }
 
-function line(id, points, color, yTitle, extra) {
-    const datasets = [{ data: points, borderColor: color, backgroundColor: color + '22',
-                        borderWidth: 2, pointRadius: 0, tension: 0.25, fill: false }];
-    (extra || []).filter(Boolean).forEach(d => datasets.push(d));
-    new Chart(document.getElementById(id), { type: 'line', data: { datasets }, options: opts(yTitle) });
+function baseOpts(spanMs, yTitle, yExtra, C) {
+    const fmt = makeFmt(spanMs);
+    return {
+        responsive: true, maintainAspectRatio: false,
+        // No animation: charts are created on every range switch and must paint
+        // their first frame synchronously (rAF animations stall in a background
+        // tab, and instant redraw is snappier on a Pi/phone anyway).
+        animation: false,
+        interaction: { mode: 'nearest', intersect: false },
+        scales: {
+            x: { type: 'linear',
+                 grid: { color: C.grid, drawTicks: false },
+                 ticks: { maxTicksLimit: 7, maxRotation: 0, autoSkip: true, callback: fmt,
+                          font: { size: 10 }, color: C.tick } },
+            y: Object.assign({
+                 grid: { color: C.grid, drawTicks: false },
+                 ticks: { font: { size: 10 }, color: C.tick },
+                 title: { display: !!yTitle, text: yTitle, color: C.tick, font: { size: 10 } }
+               }, yExtra || {})
+        },
+        plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { title: it => fullFmt(it[0].parsed.x) } }
+        }
+    };
 }
 
-const windPts = xy(W, 'wind');
-const capePts = xy(W, 'cape');
-line('c-temp', xy(W, 'temp'), '#2b50d6', '°C');
-line('c-wind', windPts, '#a85a00', 'km/h', [thresholdDS(windPts, WIND_THR)]);
-line('c-cape', capePts, '#6b4a00', 'J/kg', [thresholdDS(capePts, CAPE_THR)]);
+function thresholdDS(points, thr, color) {
+    if (!points.length) return null;
+    const xs = points.map(p => p.x);
+    return { data: [{ x: Math.min(...xs), y: thr }, { x: Math.max(...xs), y: thr }],
+             borderColor: color, borderDash: [5, 4], borderWidth: 1,
+             pointRadius: 0, fill: false, order: 99 };
+}
 
-// Rain: forecast probability line + threshold + radar "rain near" dots at the top.
-const rainPts = xy(W, 'rain_prob');
-const radarDots = R.filter(d => d.rain_near).map(d => ({ x: ms(d.ts), y: 100 }));
-new Chart(document.getElementById('c-rain'), {
-    type: 'line',
-    data: { datasets: [
-        { data: rainPts, borderColor: '#1a7f3c', backgroundColor: '#1a7f3c22',
-          borderWidth: 2, pointRadius: 0, tension: 0.25, fill: false },
-        thresholdDS(rainPts, RAIN_THR),
-        { type: 'scatter', data: radarDots, borderColor: '#b42318',
-          backgroundColor: '#b42318', pointRadius: 3 },
-    ].filter(Boolean) },
-    options: opts('%', { min: 0, max: 105 }),
+function destroyAll() { Object.keys(charts).forEach(k => { charts[k].destroy(); delete charts[k]; }); }
+
+// Show a graceful "no data" note over a canvas when a range has too few points.
+function emptyGuard(id, has) {
+    const cv = document.getElementById(id);
+    const wrap = cv.parentElement;
+    let ov = wrap.querySelector('.chart-empty');
+    if (!has) {
+        cv.style.visibility = 'hidden';
+        if (!ov) { ov = document.createElement('div'); ov.className = 'chart-empty'; wrap.appendChild(ov); }
+        ov.textContent = App.t('no_points');
+    } else {
+        cv.style.visibility = 'visible';
+        if (ov) ov.remove();
+    }
+    return has;
+}
+
+// ===================== render everything for the active range =====================
+function render() {
+    destroyAll();
+    const C = themeColors();
+
+    const allTs = [...W_ALL.map(d => d.ts), ...R_ALL.map(d => d.ts)].map(ms);
+    const anchor = allTs.length ? Math.max(...allTs) : Date.now();
+
+    const W = sliceByRange(W_ALL, currentRange, anchor);
+    const R = sliceByRange(R_ALL, currentRange, anchor);
+
+    // Cap points per line so 30 j / Tout stay light and readable on a phone.
+    const MAXPTS = currentRange === '24h' ? 400 : (currentRange === '7j' ? 300 : 200);
+    const ds = pts => downsample(pts, MAXPTS);
+
+    const spanMs = W.length ? (ms(W[W.length - 1].ts) - ms(W[0].ts)) : RANGES[currentRange];
+
+    // ---------- HERO: indoor vs outdoor ----------
+    const outPts = ds(xyKey(W, 'temp'));
+    // Future field: wseries[].temp_in (indoor sensor). Absent today.
+    const inPts  = ds(xyKey(W, 'temp_in'));
+    const heroNote = document.getElementById('hero-note');
+    const heroDatasets = [{
+        label: App.t('lg_outdoor'), data: outPts, borderColor: C.temp, backgroundColor: C.temp + '22',
+        borderWidth: 2, pointRadius: 0, tension: 0.25, fill: false
+    }];
+    if (inPts.length) {
+        heroDatasets.unshift({
+            label: App.t('lg_indoor'), data: inPts, borderColor: C.indoor, backgroundColor: C.indoor + '22',
+            borderWidth: 2, pointRadius: 0, tension: 0.25, fill: false, borderDash: [] });
+        heroNote.textContent = '';
+    } else {
+        heroNote.textContent = App.t('indoor_soon');
+    }
+    if (emptyGuard('c-hero', outPts.length || inPts.length)) {
+        const o = baseOpts(spanMs, App.t('ax_temp'), {}, C);
+        o.plugins.legend = { display: true, labels: { boxWidth: 12, font: { size: 11 }, color: C.tick } };
+        charts.hero = new Chart(document.getElementById('c-hero'), { type: 'line', data: { datasets: heroDatasets }, options: o });
+    }
+
+    // ---------- outdoor temp ----------
+    const tempPts = ds(xyKey(W, 'temp'));
+    if (emptyGuard('c-temp', tempPts.length)) {
+        charts.temp = new Chart(document.getElementById('c-temp'), {
+            type: 'line',
+            data: { datasets: [{ data: tempPts, borderColor: C.temp, backgroundColor: C.temp + '22',
+                    borderWidth: 2, pointRadius: 0, tension: 0.25, fill: false }] },
+            options: baseOpts(spanMs, App.t('ax_temp'), {}, C)
+        });
+    }
+
+    // ---------- gusts + threshold ----------
+    const windPts = ds(xyKey(W, 'wind'));
+    if (emptyGuard('c-wind', windPts.length)) {
+        charts.wind = new Chart(document.getElementById('c-wind'), {
+            type: 'line',
+            data: { datasets: [
+                { data: windPts, borderColor: C.wind, backgroundColor: C.wind + '22',
+                  borderWidth: 2, pointRadius: 0, tension: 0.25, fill: false },
+                thresholdDS(windPts, WIND_THR, C.danger)
+            ].filter(Boolean) },
+            options: baseOpts(spanMs, App.t('ax_wind'), {}, C)
+        });
+    }
+
+    // ---------- rain % + radar dots ----------
+    const rainPts = ds(xyKey(W, 'rain_prob'));
+    const radarDots = R.filter(d => d.rain_near).map(d => ({ x: ms(d.ts), y: 100 }));
+    if (emptyGuard('c-rain', rainPts.length || radarDots.length)) {
+        charts.rain = new Chart(document.getElementById('c-rain'), {
+            type: 'line',
+            data: { datasets: [
+                { data: rainPts, borderColor: C.rain, backgroundColor: C.rain + '22',
+                  borderWidth: 2, pointRadius: 0, tension: 0.25, fill: false },
+                thresholdDS(rainPts, RAIN_THR, C.danger),
+                { type: 'scatter', data: radarDots, borderColor: C.danger,
+                  backgroundColor: C.danger, pointRadius: 3 }
+            ].filter(Boolean) },
+            options: baseOpts(spanMs, App.t('ax_pct'), { min: 0, max: 105 }, C)
+        });
+    }
+
+    // ---------- CAPE ----------
+    const capePts = ds(xyKey(W, 'cape'));
+    if (emptyGuard('c-cape', capePts.length)) {
+        charts.cape = new Chart(document.getElementById('c-cape'), {
+            type: 'line',
+            data: { datasets: [
+                { data: capePts, borderColor: C.cape, backgroundColor: C.cape + '22',
+                  borderWidth: 2, pointRadius: 0, tension: 0.25, fill: false },
+                thresholdDS(capePts, CAPE_THR, C.danger)
+            ].filter(Boolean) },
+            options: baseOpts(spanMs, App.t('ax_cape'), {}, C)
+        });
+    }
+
+    // ---------- advisory timeline (stepped, not downsampled — state matters) ----------
+    const advClose = W.map(d => ({ x: ms(d.ts), y: d.advise ? 1 : 0 }));
+    const advCaut  = W.map(d => ({ x: ms(d.ts), y: d.caution ? 0.5 : 0 }));
+    if (emptyGuard('c-advice', W.length)) {
+        const o = baseOpts(spanMs, '', { min: 0, max: 1.1, ticks: { display: false } }, C);
+        o.plugins.legend = { display: true, labels: { boxWidth: 12, font: { size: 11 }, color: C.tick } };
+        charts.advice = new Chart(document.getElementById('c-advice'), {
+            type: 'line',
+            data: { datasets: [
+                { label: App.t('lg_close'), data: advClose, stepped: true, borderColor: C.danger, borderWidth: 2, pointRadius: 0 },
+                { label: App.t('lg_caution'), data: advCaut, stepped: true, borderColor: C.wind, borderWidth: 1.5, pointRadius: 0 }
+            ] },
+            options: o
+        });
+    }
+
+    // ---------- meta line ----------
+    const meta = document.getElementById('cond-meta');
+    if (W.length || R.length) {
+        const span = [...W.map(d => d.ts), ...R.map(d => d.ts)].sort();
+        meta.textContent = span.length
+            ? App.t('meta_span', { w: W.length, r: R.length, from: fullFmt(ms(span[0])), to: fullFmt(ms(span[span.length - 1])) })
+            : App.t('meta', { w: W.length, r: R.length });
+    } else {
+        meta.textContent = App.t('no_points');
+    }
+}
+
+// ===================== range switcher wiring =====================
+document.getElementById('range-switch').addEventListener('click', function (e) {
+    const btn = e.target.closest('button[data-range]');
+    if (!btn) return;
+    currentRange = btn.getAttribute('data-range');
+    this.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === btn));
+    render();
 });
 
-// Advisory timeline: when the system would have advised closing / flagged caution.
-new Chart(document.getElementById('c-advice'), {
-    type: 'line',
-    data: { datasets: [
-        { label: 'Fermeture', data: W.map(d => ({ x: ms(d.ts), y: d.advise ? 1 : 0 })),
-          stepped: true, borderColor: '#b42318', borderWidth: 2, pointRadius: 0 },
-        { label: 'Vigilance', data: W.map(d => ({ x: ms(d.ts), y: d.caution ? 0.5 : 0 })),
-          stepped: true, borderColor: '#a85a00', borderWidth: 1.5, pointRadius: 0 },
-    ] },
-    options: Object.assign(opts('', { min: 0, max: 1.1, ticks: { display: false } }),
-                           { plugins: { legend: { display: true, labels: { boxWidth: 12, font: { size: 11 } } },
-                                        tooltip: { callbacks: { title: it => fmt(it[0].parsed.x) } } } }),
-});
+// Re-render on language / theme change (colours, labels, date locale all update).
+App.onChange(render);
 
-const span = [...W.map(d => d.ts), ...R.map(d => d.ts)].sort();
-document.getElementById('cond-meta').textContent =
-    `${W.length} relevés météo · ${R.length} relevés radar` +
-    (span.length ? ` · du ${fmt(ms(span[0]))} au ${fmt(ms(span[span.length - 1]))}` : '');
+render();
 </script>
 {% endif %}
 {% endblock %}

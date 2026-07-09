@@ -4,10 +4,19 @@ Open-Meteo is a free, keyless forecast API. We pull the current temperature
 plus the next few hours of precipitation probability and wind gusts, and
 decide whether open windows ought to be closed for protection.
 
-Phase 1 is advisory only: decisions are written to the history (so thresholds
-can be tuned against reality) but no Modbus command is ever sent. The hook for
-Phase 2 is `evaluate_and_log` — that's where actuation would slot in once a
-relay is deployed and trusted.
+Live actuation is gated by the two automation toggles (db.get_automation):
+
+  - auto-close ON  -> the close evaluators DRIVE every equipped window shut on a
+    wind/rain (or forecast-outage) trigger, and record the real result. OFF ->
+    advisory only: a "Fermeture conseillée" history row + push for the windows
+    believed open, nothing driven.
+  - auto-open ON   -> the open evaluator DRIVES cool/calm/dry night openings, but
+    ONLY when auto-close is also ON (safety link — never open a window without
+    its automatic close protection). Otherwise the open is simulated (logged,
+    not driven).
+
+So a toggle is the live switch: off keeps logging the trigger for calibration
+without moving a motor; on drives for real.
 """
 import logging
 import threading
@@ -17,8 +26,10 @@ import requests
 
 import config
 import db
+import modbus_tcp
 import notify
 import radar
+import window_state
 
 log = logging.getLogger(__name__)
 
@@ -33,8 +44,8 @@ _latest_lock = threading.Lock()
 _advised: set[tuple[str, str]] = set()
 _advised_lock = threading.Lock()
 
-# Closed windows we've already logged a *simulated* auto-open for, so the
-# simulated open is recorded once per favourable episode (rising edge) too.
+# Closed windows we've already acted on for auto-open (driven or simulated), so
+# the open is recorded once per favourable episode (rising edge) too.
 _auto_opened: set[tuple[str, str]] = set()
 _auto_opened_lock = threading.Lock()
 
@@ -45,9 +56,15 @@ _auto_opened_lock = threading.Lock()
 #   _notified_open  : a favourable-to-open push is outstanding.
 #   _weather_alerted: any weather alert (close or watch) is outstanding; gates
 #                     the single "all clear" push so it fires once, at the end.
+#   _close_pushed   : the close push actually went out this episode. Separate
+#                     from _notified_close because we only push once a window is
+#                     actually open — if the advisory rises while everything is
+#                     shut we latch the episode but hold the push until (and if)
+#                     a window opens during it.
 _notified_close = False
 _notified_open = False
 _weather_alerted = False
+_close_pushed = False
 _notify_lock = threading.Lock()
 
 # Graceful degradation: when the forecast can't be fetched we act on the last
@@ -340,6 +357,53 @@ def open_plan(wsum: dict | None = None, rsum: dict | None = None) -> dict:
     return {"full": False, "reason": reason}
 
 
+def drive_command(action: str, wsum: dict | None) -> tuple[float, str, bool | str]:
+    """(drive_seconds, reason_suffix, stored_state) for a window command.
+
+    Close always overdrives to seat fully shut; open is full or partial depending
+    on wind/rain (open_plan, fed the same summary that gets recorded with the
+    event so the decision and the history conditions can't diverge). The suffix
+    makes the depth visible in the history reason; the stored state
+    (False / "full" / "partial") keeps it visible in the live UI. Shared by the
+    manual routes (app.py) and the live auto evaluators below.
+    """
+    if action == "close":
+        return config.WINDOW_CLOSE_SECONDS, "", False
+    plan = open_plan(wsum)
+    if plan["full"]:
+        return config.WINDOW_FULL_TRAVEL_SECONDS, " — ouverture complète", "full"
+    return (config.WINDOW_PARTIAL_OPEN_SECONDS,
+            f" — ouverture partielle ({plan['reason']})", "partial")
+
+
+def _drive_and_record(building: str, window: str, action: str, *, source: str,
+                      actor: str, reason: str, conditions: dict, status: dict) -> bool:
+    """Drive ONE window for a live auto action and record the event.
+
+    Mutates `status` in place on success (the caller saves it once for the whole
+    batch). The reason gets the depth suffix on success, or the failure message
+    on error — a failed drive is recorded (success=0) but the belief state is not
+    advanced. Returns True iff the drive succeeded. Never raises: a Modbus error
+    surfaces as success=False, so one dead window can't abort the batch.
+    """
+    duration, suffix, new_status = drive_command(action, conditions)
+    try:
+        success, message = modbus_tcp.send_window_command(building, window, action, duration)
+    except Exception as e:                       # send_window_command shouldn't raise, but be safe
+        success, message = False, str(e)
+    if success:
+        status.setdefault(building, {})[window] = new_status
+        full_reason = reason + suffix
+    else:
+        full_reason = f"{reason} — échec : {message}"
+    db.record_event(action, building=building, window=window, source=source,
+                    actor=actor, reason=full_reason, success=success,
+                    conditions=conditions)
+    log.info("Auto %s %s %s/%s: %s", action, "OK" if success else "FAILED",
+             building, window, full_reason)
+    return success
+
+
 def current() -> dict | None:
     """Latest forecast summary merged with the combined close decision (for UI)."""
     wsum = latest()
@@ -354,16 +418,19 @@ def current() -> dict | None:
 
 
 def evaluate_close(status_provider) -> None:
-    """Rising-edge log a close when wind or rain fires the close advisory.
+    """React to a wind/rain close trigger, once per episode (rising edge).
 
-    Two modes, chosen by the "auto-close" setting:
-      - OFF (group nudge): advise closing the windows we believe are open.
-      - ON (auto): drive *every* equipped window shut, regardless of believed
+    Two modes, chosen by the "auto-close" toggle:
+      - ON (live): DRIVE *every* equipped window shut, regardless of believed
         state — closing is idempotent (drives to the stop), so a wrong belief
-        can't leave one open in a storm. Dry-run in Phase 1: logged, not driven.
+        can't leave one open in a storm. The real result is recorded and the
+        belief state persisted.
+      - OFF (advisory): drive nothing; log a "Fermeture conseillée" row (and the
+        push, in notify_weather) for the windows we believe are open, so a
+        resident is nudged to close them by hand.
 
     Called by both pollers (forecast and radar), so a radar update arriving
-    between forecast polls still reacts promptly. Logged once per episode.
+    between forecast polls still reacts promptly. Acted on once per episode.
     """
     wsum = latest()
     if wsum is None:
@@ -379,24 +446,31 @@ def evaluate_close(status_provider) -> None:
 
     with _advised_lock:
         if decision["advise_close"]:
+            actor = "+".join(decision["triggers"])
+            reasons = " ; ".join(decision["reasons"])
+            conditions = {**wsum, **decision, "radar": rsum}
             if auto_close:
                 targets = all_equipped
-                source = "auto"
-                reason = "Simulation — fermeture auto — " + " ; ".join(decision["reasons"])
+                driven = False
+                for building, window in targets - _advised:
+                    if _drive_and_record(building, window, "close", source="auto",
+                                         actor=actor,
+                                         reason=f"Fermeture automatique — {reasons}",
+                                         conditions=conditions, status=status):
+                        driven = True
+                if driven:
+                    window_state.save_status(status)
             else:
                 targets = open_equipped
-                source = "advisory"
-                reason = "Fermeture conseillée — " + " ; ".join(decision["reasons"])
-            actor = "+".join(decision["triggers"])
-            conditions = {**wsum, **decision, "radar": rsum}
-            for building, window in targets - _advised:
-                db.record_event(
-                    "close", building=building, window=window,
-                    source=source, actor=actor, reason=reason,
-                    success=None, conditions=conditions,
-                )
-                log.info("%s close logged for %s/%s: %s",
-                         "Auto" if auto_close else "Advisory", building, window, reason)
+                reason = "Fermeture conseillée — " + reasons
+                for building, window in targets - _advised:
+                    db.record_event(
+                        "close", building=building, window=window,
+                        source="advisory", actor=actor, reason=reason,
+                        success=None, conditions=conditions,
+                    )
+                    log.info("Advisory close logged for %s/%s: %s",
+                             building, window, reason)
             _advised.update(targets)
             _advised.intersection_update(targets)
         else:
@@ -429,15 +503,16 @@ def _open_favourable(settings: dict, wsum: dict, decision: dict) -> bool:
 
 
 def evaluate_open(status_provider) -> None:
-    """Rising-edge log a *simulated* auto-open when it's cool, calm and dry.
+    """React to a cool/calm/dry night opening, once per favourable episode.
 
-    Phase 1 is dry-run: no Modbus command is ever sent. When the user has
-    enabled "auto-open below X°C" (a UI toggle), each poll where conditions are
-    favourable — wind OK, no rain (radar or forecast), and the outside
-    temperature under the chosen threshold — logs an 'open' event per equipped
-    window so the history shows when the windows *would* have opened. Logged
-    once per favourable episode (rising edge), mirroring the close advisory, so
-    it doesn't flood the history on every poll.
+    Fires only inside the night-airing window when it's cool enough and nothing
+    would advise closing (see _open_favourable, which also requires the auto-open
+    toggle). Then, per equipped window we believe closed:
+      - auto-close ALSO on (safety link) -> DRIVE it open and record the result;
+      - otherwise                        -> simulate (log the open, drive nothing)
+    so a window is never opened without its automatic close protection, and the
+    trigger is still logged for calibration when driving is held back. Acted on
+    once per favourable episode (rising edge), so it doesn't flood the history.
     """
     settings = db.get_automation()
     wsum = latest()
@@ -449,6 +524,8 @@ def evaluate_open(status_provider) -> None:
     decision = close_decision(wsum, rsum)
 
     favourable = _open_favourable(settings, wsum, decision)
+    # Safety link: only actually drive open when auto-close will protect it.
+    live = settings["close_enabled"]
 
     status = status_provider()
     closed_equipped = {
@@ -460,18 +537,28 @@ def evaluate_open(status_provider) -> None:
 
     with _auto_opened_lock:
         if favourable:
-            reason = (f"Simulation — ouverture auto : {round(temp)} °C "
-                      f"(seuil {threshold} °C), sans vent ni pluie")
+            detail = f"{round(temp)} °C (seuil {threshold} °C), sans vent ni pluie"
             conditions = {**wsum, **decision, "radar": rsum,
-                          "simulated": True, "auto_open_threshold_c": threshold}
+                          "auto_open_threshold_c": threshold}
+            driven = False
             for building, window in closed_equipped - _auto_opened:
-                db.record_event(
-                    "open", building=building, window=window,
-                    source="auto", actor="cooling", reason=reason,
-                    success=None, conditions=conditions,
-                )
-                log.info("Simulated auto-open logged for %s/%s: %s",
-                         building, window, reason)
+                if live:
+                    if _drive_and_record(building, window, "open", source="auto",
+                                         actor="cooling",
+                                         reason=f"Ouverture automatique : {detail}",
+                                         conditions=conditions, status=status):
+                        driven = True
+                else:
+                    db.record_event(
+                        "open", building=building, window=window,
+                        source="auto", actor="cooling",
+                        reason=f"Simulation — ouverture automatique : {detail}",
+                        success=None, conditions={**conditions, "simulated": True},
+                    )
+                    log.info("Simulated auto-open logged for %s/%s (auto-close off)",
+                             building, window)
+            if driven:
+                window_state.save_status(status)
             _auto_opened.update(closed_equipped)
             _auto_opened.intersection_update(closed_equipped)
         else:
@@ -483,26 +570,28 @@ def _msg(body: str, temps: str) -> str:
     return f"{body}. {temps}." if temps else f"{body}."
 
 
-def notify_weather() -> None:
+def notify_weather(status_provider=None) -> None:
     """Push a notification on each rising/falling edge of the weather signals.
 
-    Independent of the dry-run history logging in evaluate_close/open: here we
+    Independent of the per-window history logging in evaluate_close/open: here we
     care about *episodes*, not per-window state, so people get one push when a
     storm arrives and one when it passes. Decisions (which flags to flip, what
     to send) are made under the lock; the actual sends happen after releasing it
     so a slow ntfy POST can't block the other poller.
 
       close advisory rising  -> "Fermeture conseillée" / "Fermeture automatique"
-      caution rising (first)  -> "Météo à surveiller"
-      favourable-to-open      -> "Ouverture (simulation)"
-      everything clears       -> "Météo dégagée" (once)
+      caution rising (first)  -> "Météo à surveiller"     (history only, muted)
+      favourable-to-open      -> "Ouverture automatique"  (history only, muted)
+      everything clears       -> "Météo dégagée"          (history only, muted)
 
-    Caution and the all-clear leave no window event of their own (they aren't
-    window actions), so unlike the close/open pushes — which evaluate_close/open
-    already log — we record them here as `system` weather events, so every push
-    has a matching row in /history.
+    Only the close advisory still pushes, and only when a window is actually open
+    (see `any_open`) — the softer signals are muted to push in the notify catalog
+    (`push: False`) but their `system` weather rows are still recorded here so
+    /history keeps the full picture. Caution and the all-clear leave no window
+    event of their own (they aren't window actions), which is why they're logged
+    here rather than by evaluate_close/open.
     """
-    global _notified_close, _notified_open, _weather_alerted
+    global _notified_close, _notified_open, _weather_alerted, _close_pushed
     wsum = latest()
     if wsum is None:
         return
@@ -514,21 +603,44 @@ def notify_weather() -> None:
     threshold = settings["open_temp_c"]
     temps = notify.format_temps(wsum)
 
+    # Only worth telling anyone to close if something is actually open. Gate the
+    # close push on at least one equipped window being open right now; if none
+    # are, the advisory is moot (nothing to close) and stays silent.
+    any_open = False
+    if status_provider is not None:
+        status = status_provider()
+        any_open = any(status.get(b, {}).get(w)
+                       for b in config.EQUIPPED_BUILDINGS
+                       for w in status.get(b, {}))
+
+    def _close_push():
+        reason = "; ".join(decision["reasons"]) or "vent fort ou pluie"
+        if settings["close_enabled"]:
+            return ("auto_closed", "Fermeture automatique",
+                    _msg(f"Fermeture des fenêtres — {reason}", temps))
+        return ("close_advised", "Fermeture conseillée",
+                _msg(f"Pensez à fermer les fenêtres — {reason}", temps))
+
     pending: list[tuple[str, str, str]] = []
     logs: list[tuple[str, str]] = []     # (action, reason) weather events to record
     with _notify_lock:
         if advise and not _notified_close:
-            reason = "; ".join(decision["reasons"]) or "vent fort ou pluie"
-            if settings["close_enabled"]:
-                pending.append(("auto_closed", "Fermeture automatique",
-                                _msg(f"Fermeture des fenêtres — {reason}", temps)))
-            else:
-                pending.append(("close_advised", "Fermeture conseillée",
-                                _msg(f"Pensez à fermer les fenêtres — {reason}", temps)))
+            # Advisory just rose: push now if a window is open, else latch the
+            # episode and wait for one to open.
+            if any_open:
+                pending.append(_close_push())
+                _close_pushed = True
             _notified_close = True
+            _weather_alerted = True
+        elif advise and not _close_pushed and any_open:
+            # Advisory already up from before, and a window has now been opened
+            # into it — send the (still-pending) close push.
+            pending.append(_close_push())
+            _close_pushed = True
             _weather_alerted = True
         elif not advise:
             _notified_close = False
+            _close_pushed = False
 
         # Caution is the softer "keep an eye out" signal; only push it as a
         # standalone first alert — once a close push has gone out (_weather_alerted)
@@ -542,7 +654,7 @@ def notify_weather() -> None:
 
         favourable = _open_favourable(settings, wsum, decision)
         if favourable and not _notified_open:
-            pending.append(("auto_opened", "Ouverture (simulation)",
+            pending.append(("auto_opened", "Ouverture automatique",
                             _msg(f"Conditions favorables — sans vent ni pluie, "
                                  f"sous {threshold} °C", temps)))
             _notified_open = True
@@ -566,12 +678,13 @@ def notify_weather() -> None:
 
 
 def evaluate(status_provider) -> None:
-    """Run both dry-run evaluators (close advisory + auto-open simulation), then
-    fire any edge notifications."""
+    """Run both auto evaluators (close then open — order matters: a window shut
+    for a storm must not be re-opened in the same pass), then fire any edge
+    notifications. Each evaluator drives or simulates per its toggle."""
     evaluate_close(status_provider)
     evaluate_open(status_provider)
     try:
-        notify_weather()
+        notify_weather(status_provider)
     except Exception:
         log.exception("Weather notification error")
 
@@ -616,7 +729,12 @@ def _describe_last_state(wsum: dict | None, rsum: dict | None) -> str:
 
 
 def _enter_degraded(status_provider, wsum, rsum, age, touchy) -> None:
-    """Log a dry-run precautionary close and fire the (placeholder) notify."""
+    """Precautionary close on a forecast outage, then fire the stale notify.
+
+    Same live/advisory split as evaluate_close: auto-close ON drives every
+    equipped window shut (blind during risk is the dangerous case, so seat them
+    all); OFF advises for the windows believed open.
+    """
     minutes = round(age / 60)
     last_state = _describe_last_state(wsum, rsum)
     auto_close = db.get_automation()["close_enabled"]
@@ -626,23 +744,30 @@ def _enter_degraded(status_provider, wsum, rsum, age, touchy) -> None:
     }
     open_equipped = {(b, w) for (b, w) in all_equipped if status.get(b, {}).get(w)}
 
-    if auto_close:
-        targets, source = all_equipped, "auto"
-        verb = "Simulation — fermeture préventive"
-    else:
-        targets, source = open_equipped, "advisory"
-        verb = "Fermeture préventive conseillée"
-    reason = (f"{verb} — météo indisponible depuis {minutes} min "
+    detail = (f"météo indisponible depuis {minutes} min "
               f"(dernier état : {last_state})")
     conditions = {"stale": True, "stale_seconds": round(age), "touchy": touchy,
                   "last_summary": wsum, "radar": rsum}
-    for building, window in targets:
-        db.record_event("close", building=building, window=window,
-                        source=source, actor="stale", reason=reason,
-                        success=None, conditions=conditions)
-    log.warning("Weather degraded (touchy=%s): %s", touchy, reason)
+    if auto_close:
+        verb = "Fermeture préventive"
+        driven = False
+        for building, window in all_equipped:
+            if _drive_and_record(building, window, "close", source="auto",
+                                 actor="stale", reason=f"{verb} — {detail}",
+                                 conditions=conditions, status=status):
+                driven = True
+        if driven:
+            window_state.save_status(status)
+    else:
+        verb = "Fermeture préventive conseillée"
+        for building, window in open_equipped:
+            db.record_event("close", building=building, window=window,
+                            source="advisory", actor="stale",
+                            reason=f"{verb} — {detail}",
+                            success=None, conditions=conditions)
+    log.warning("Weather degraded (touchy=%s): %s — %s", touchy, verb, detail)
     notify.send(
-        "weather_stale", "Météo indisponible", reason,
+        "weather_stale", "Météo indisponible", f"{verb} — {detail}",
         priority="high" if touchy else "default",
         stale_minutes=minutes, touchy=touchy,
     )
@@ -653,9 +778,9 @@ def evaluate_staleness(status_provider) -> None:
 
     Runs every poll cycle (success or failure). When the most recent successful
     forecast is older than the applicable timeout — short if the last state was
-    touchy, long if it was calm — enter a degraded state once: log a dry-run
-    precautionary close and notify. A later successful poll clears it and
-    notifies recovery. Dry-run in Phase 1: nothing is ever actuated.
+    touchy, long if it was calm — enter a degraded state once: a precautionary
+    close (driven or advisory per the auto-close toggle) and notify. A later
+    successful poll clears it and notifies recovery.
     """
     global _degraded
     wsum = latest()
