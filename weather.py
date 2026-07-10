@@ -7,9 +7,11 @@ decide whether open windows ought to be closed for protection.
 Live actuation is gated by the two automation toggles (db.get_automation):
 
   - auto-close ON  -> the close evaluators DRIVE every equipped window shut on a
-    wind/rain (or forecast-outage) trigger, and record the real result. OFF ->
-    advisory only: a "Fermeture conseillée" history row + push for the windows
-    believed open, nothing driven.
+    wind/rain (or forecast-outage) trigger, and record the real result. They also
+    bring the airing back in when the night-airing window ends (sunrise + grace)
+    or the air warms past the open threshold — a routine close, recorded but not
+    pushed. OFF -> advisory only: a "Fermeture conseillée" history row + push for
+    the windows believed open, nothing driven.
   - auto-open ON   -> the open evaluator DRIVES cool/calm/dry night openings, but
     ONLY when auto-close is also ON (safety link — never open a window without
     its automatic close protection). Otherwise the open is simulated (logged,
@@ -48,6 +50,14 @@ _advised_lock = threading.Lock()
 # the open is recorded once per favourable episode (rising edge) too.
 _auto_opened: set[tuple[str, str]] = set()
 _auto_opened_lock = threading.Lock()
+
+# Routine (non-weather) close latch. The airing is brought back in once, on the
+# transition into "should be shut" — the night-airing window ending (sunrise +
+# grace) or the outside air climbing back past the open threshold. One-shot per
+# episode: it closes at the transition, then leaves alone a window a resident
+# deliberately reopens later in the day (resets when we re-enter the airing).
+_vent_close_latched = False
+_vent_close_lock = threading.Lock()
 
 # Notification edges — episode-level, distinct from the per-window history
 # dedupe above: a storm tripping five windows is ONE push, not five. Guarded by
@@ -418,63 +428,101 @@ def current() -> dict | None:
 
 
 def evaluate_close(status_provider) -> None:
-    """React to a wind/rain close trigger, once per episode (rising edge).
+    """Bring the windows shut on any close trigger. Two independent paths:
 
-    Two modes, chosen by the "auto-close" toggle:
-      - ON (live): DRIVE *every* equipped window shut, regardless of believed
-        state — closing is idempotent (drives to the stop), so a wrong belief
-        can't leave one open in a storm. The real result is recorded and the
-        belief state persisted.
-      - OFF (advisory): drive nothing; log a "Fermeture conseillée" row (and the
-        push, in notify_weather) for the windows we believe are open, so a
-        resident is nudged to close them by hand.
+    1. Weather (wind/rain, or a forecast outage via _enter_degraded): the ALERTING
+       close. Drives *every* equipped window shut regardless of believed state —
+       closing is idempotent (drives to the stop), so a wrong belief can't leave
+       one open in a storm — and is the only close that also pushes (notify_weather).
+    2. Routine (airing done): the night-airing window ending (sunrise + grace) or
+       the outside air warming back past the open threshold + margin. Fires once on
+       the transition, targets only the windows we believe open (no daily motor run
+       on already-shut windows), and never pushes — it's expected daily behaviour,
+       recorded in /history but not worth a notification.
 
-    Called by both pollers (forecast and radar), so a radar update arriving
-    between forecast polls still reacts promptly. Acted on once per episode.
+    Both honour the "auto-close" toggle: ON drives for real and records the result;
+    OFF logs a "Fermeture conseillée" advisory for the windows believed open and
+    drives nothing. Called by both pollers (forecast and radar), so a radar update
+    arriving between forecast polls still reacts promptly.
     """
+    global _vent_close_latched
     wsum = latest()
     if wsum is None:
         return
     rsum = radar.latest()
     decision = close_decision(wsum, rsum)
-    auto_close = db.get_automation()["close_enabled"]
+    settings = db.get_automation()
+    auto_close = settings["close_enabled"]
     status = status_provider()
     all_equipped = {
         (b, w) for b in config.EQUIPPED_BUILDINGS for w in status.get(b, {})
     }
-    open_equipped = {(b, w) for (b, w) in all_equipped if status.get(b, {}).get(w)}
+    drove = False
 
+    def _record_close(targets, actor, reason_text, conditions):
+        """Drive (live) or advise (toggle off) a close for `targets`; True if driven."""
+        nonlocal drove
+        if auto_close:
+            for building, window in targets:
+                if _drive_and_record(building, window, "close", source="auto",
+                                     actor=actor,
+                                     reason=f"Fermeture automatique — {reason_text}",
+                                     conditions=conditions, status=status):
+                    drove = True
+        else:
+            reason = "Fermeture conseillée — " + reason_text
+            for building, window in targets:
+                db.record_event("close", building=building, window=window,
+                                source="advisory", actor=actor, reason=reason,
+                                success=None, conditions=conditions)
+                log.info("Advisory close logged for %s/%s: %s",
+                         building, window, reason)
+
+    # 1. Weather close — rising edge per episode, everything shut when live.
     with _advised_lock:
         if decision["advise_close"]:
-            actor = "+".join(decision["triggers"])
-            reasons = " ; ".join(decision["reasons"])
             conditions = {**wsum, **decision, "radar": rsum}
-            if auto_close:
-                targets = all_equipped
-                driven = False
-                for building, window in targets - _advised:
-                    if _drive_and_record(building, window, "close", source="auto",
-                                         actor=actor,
-                                         reason=f"Fermeture automatique — {reasons}",
-                                         conditions=conditions, status=status):
-                        driven = True
-                if driven:
-                    window_state.save_status(status)
-            else:
-                targets = open_equipped
-                reason = "Fermeture conseillée — " + reasons
-                for building, window in targets - _advised:
-                    db.record_event(
-                        "close", building=building, window=window,
-                        source="advisory", actor=actor, reason=reason,
-                        success=None, conditions=conditions,
-                    )
-                    log.info("Advisory close logged for %s/%s: %s",
-                             building, window, reason)
+            targets = all_equipped if auto_close else {
+                (b, w) for (b, w) in all_equipped if status.get(b, {}).get(w)}
+            _record_close(targets - _advised, "+".join(decision["triggers"]),
+                          " ; ".join(decision["reasons"]), conditions)
             _advised.update(targets)
             _advised.intersection_update(targets)
         else:
             _advised.clear()
+
+    # 2. Routine close — airing window ended, or the air has warmed back up.
+    # vent_ended only when the gate is *known* off (venting_ok is False); an
+    # undeterminable gate leaves venting_ok defaulted True and never drives a close.
+    temp_c = wsum.get("temp_c")
+    close_temp = settings["open_temp_c"] + config.AUTO_CLOSE_TEMP_MARGIN_C
+    vent_ended = wsum.get("venting_ok") is False
+    too_warm = temp_c is not None and temp_c >= close_temp
+    routine_close = vent_ended or too_warm
+
+    with _vent_close_lock:
+        if routine_close and not _vent_close_latched:
+            reasons, actors = [], []
+            if vent_ended:
+                reasons.append("fin de l'aération nocturne")
+                actors.append("jour")
+            if too_warm:
+                reasons.append(f"air extérieur trop chaud ({round(temp_c)} °C)")
+                actors.append("chaleur")
+            conditions = {**wsum, **decision, "radar": rsum,
+                          "vent_ended": vent_ended, "too_warm": too_warm}
+            # Recompute from `status`, which the weather path above may have just
+            # closed, so a window isn't logged shut twice in one pass.
+            open_equipped = {(b, w) for (b, w) in all_equipped
+                             if status.get(b, {}).get(w)}
+            _record_close(open_equipped, "+".join(actors),
+                          " ; ".join(reasons), conditions)
+            _vent_close_latched = True
+        elif not routine_close:
+            _vent_close_latched = False
+
+    if drove:
+        window_state.save_status(status)
 
 
 def _open_favourable(settings: dict, wsum: dict, decision: dict) -> bool:

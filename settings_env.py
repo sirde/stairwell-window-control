@@ -67,7 +67,14 @@ FIELDS = [
          label="Grâce après le lever du soleil", unit="h", type=float, default=2.0,
          min=0, max=12, step=0.5,
          help="L'ouverture automatique reste permise pendant ces heures après "
-              "le lever (toit orienté sud : l'air le plus frais suit l'aube)."),
+              "le lever (toit orienté sud : l'air le plus frais suit l'aube). "
+              "Passé ce délai, l'aération se referme automatiquement."),
+    dict(key="AUTO_CLOSE_TEMP_MARGIN_C", group="Aération nocturne",
+         label="Marge de fermeture (chaleur)", unit="°C", type=float, default=2.0,
+         min=0, max=15, step=0.5,
+         help="Referme aussi si la température extérieure dépasse le seuil "
+              "d'ouverture de cette marge. L'écart évite les allers-retours "
+              "d'ouverture / fermeture autour du seuil."),
 
     dict(key="WEATHER_LOOKAHEAD_HOURS", group="Horizons de prévision",
          label="Fenêtre imminente", unit="h", type=int, default=3,

@@ -112,6 +112,14 @@ CAPE_THRESHOLD = _TUNABLES["CAPE_THRESHOLD"]
 # is_day flag; this only extends the morning cutoff.
 MORNING_VENT_GRACE_HOURS = _TUNABLES["MORNING_VENT_GRACE_HOURS"]
 
+# Once the airing has done its job, bring the windows back in. The routine
+# (non-storm) close fires when the night-airing window ends (sunrise + grace,
+# above) OR the outside temperature climbs back to the auto-open threshold plus
+# this margin. The margin is hysteresis: without a gap, a temperature sitting on
+# the threshold would open and close repeatedly. (The open threshold itself is
+# set live on the home automation card, not here.)
+AUTO_CLOSE_TEMP_MARGIN_C = _TUNABLES["AUTO_CLOSE_TEMP_MARGIN_C"]
+
 # Graceful degradation when the forecast can't be fetched: fall back to the LAST
 # known state. A "touchy" last reading (wind / rain / storm risk) gets a short
 # grace period before a precautionary close — being blind during risk is the
